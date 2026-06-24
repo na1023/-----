@@ -806,6 +806,20 @@ const App = {
     document.getElementById('csvFile').addEventListener('change', e => { this._processFiles(e.target.files); e.target.value=''; });
   },
 
+  // ヘッダー行を自動検出してパース（先頭の説明行・空行を読み飛ばす）
+  _parseCSV(text) {
+    const lines = text.split(/\r?\n/);
+    const KEYS = ['約定日','取引日','受渡日','銘柄コード','銘柄名','銘柄','コード','数量','約定数量','株数',
+                  '受渡金額','預り区分','口座区分','売買','売買区分','取引','取引区分','単価','約定単価','区分'];
+    let headerIdx = 0, best = -1;
+    for (let i = 0; i < Math.min(lines.length, 25); i++) {
+      const c = KEYS.filter(k => lines[i].includes(k)).length;
+      if (c > best) { best = c; headerIdx = i; }
+    }
+    const sliced = lines.slice(headerIdx).join('\n').trim();
+    return Papa.parse(sliced, { header: true, skipEmptyLines: 'greedy' });
+  },
+
   _processFiles(files) {
     const log = document.getElementById('importLog');
     log.style.display = 'block'; log.innerHTML = '';
@@ -814,21 +828,38 @@ const App = {
       add(`<span class="log-info">📂 ${file.name}</span>`);
       const reader = new FileReader();
       reader.onload = () => {
+        // 文字コード判定（Shift-JIS優先、文字化けしたらUTF-8）
         let text = new TextDecoder('shift-jis').decode(reader.result);
-        if (/�/.test(text)) text = new TextDecoder('utf-8').decode(reader.result);
-        const parsed = Papa.parse(text.trim(), { header: true, skipEmptyLines: true });
+        if (/�/.test(text)) text = new TextDecoder('utf-8', { fatal: false }).decode(reader.result);
+
+        const parsed = this._parseCSV(text);
+        const fields = (parsed.meta.fields ?? []).map(f => String(f).trim());
+
         let broker = document.getElementById('brokerSel')?.value ?? 'auto';
-        if (broker === 'auto') broker = detectBroker(parsed.meta.fields ?? []);
-        if (!broker) { add('❌ 証券会社を判定できませんでした', 'log-err'); return; }
+        if (broker === 'auto') broker = detectBroker(fields);
+        if (!broker) {
+          add('❌ 証券会社を自動判定できませんでした', 'log-err');
+          add(`<span class="text-muted">検出した列名: ${fields.join(' / ') || '(なし)'}</span>`);
+          add('<span class="text-muted">↑この列名をコピーして開発者に伝えてください。または上の「証券会社」を手動選択してお試しください。</span>');
+          console.log('CSV fields:', fields, 'sample row:', parsed.data[0]);
+          return;
+        }
         add(`🔍 ${broker} / ${parsed.data.length} 行`);
         const recs = normalizeCSV(parsed.data, broker);
-        if (!recs.length) { add('❌ 有効な行が0件です', 'log-err'); return; }
+        if (!recs.length) {
+          add('❌ 有効な行が0件です', 'log-err');
+          add(`<span class="text-muted">検出した列名: ${fields.join(' / ') || '(なし)'}</span>`);
+          add(`<span class="text-muted">1行目のデータ例: ${JSON.stringify(parsed.data[0] ?? {}).slice(0,300)}</span>`);
+          console.log('CSV fields:', fields, 'sample row:', parsed.data[0]);
+          return;
+        }
         const exist = new Set(this.trades.map(deduplicateKey));
         const fresh = recs.filter(r => !exist.has(deduplicateKey(r)));
         this.trades = this.trades.concat(fresh);
         TradeStorage.save(this.trades);
         add(`✅ ${fresh.length} 件取込（重複スキップ: ${recs.length-fresh.length} 件）`, 'log-ok');
         Toast.show(`${broker}: ${fresh.length} 件取込みました`, 'success');
+        if (this.page === 'import') {} // 一覧は履歴ページで確認
       };
       reader.readAsArrayBuffer(file);
     });
