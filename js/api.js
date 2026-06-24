@@ -96,5 +96,25 @@ const YahooFinance = (() => {
     MEM_CACHE.clear();
   }
 
-  return { getQuote, getQuotes, getDividends, clearDivCache };
+  /* 株価のメモリキャッシュだけクリア（配当のローカル保存は残す） */
+  function clearMemCache() { MEM_CACHE.clear(); }
+
+  /* 銘柄検索（コード→名前、名前→コード 両対応） */
+  async function searchSymbol(query) {
+    const q = String(query ?? '').trim();
+    if (!q) return [];
+    const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=8&newsCount=0&lang=ja-JP&region=JP`;
+    try {
+      const data = await fetchRaw(url);
+      return (data?.quotes ?? [])
+        .filter(x => x.symbol && /\.T$/.test(x.symbol))   // 東証銘柄のみ
+        .map(x => ({
+          symbol: x.symbol,
+          code:   x.symbol.replace(/\.T$/, ''),
+          name:   x.longname || x.shortname || x.symbol,
+        }));
+    } catch { return []; }
+  }
+
+  return { getQuote, getQuotes, getDividends, clearDivCache, clearMemCache, searchSymbol };
 })();

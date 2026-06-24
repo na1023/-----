@@ -115,6 +115,7 @@ const App = {
      ============================================================ */
   init() {
     this.trades = TradeStorage.load();
+    this.quotes = this._loadQuoteCache();   // 前回の株価を即表示
     Toast.init();
     this._setupSidebar();
     this._setupModal();
@@ -130,6 +131,22 @@ const App = {
     });
 
     if (typeof Sync !== 'undefined') Sync.init();
+
+    // 開いている間は15分ごとに自動で株価を更新（保有ページ表示中のみ）
+    setInterval(() => {
+      if (this.page === 'portfolio') {
+        YahooFinance.clearMemCache();
+        this._fetchQuotes(Portfolio.getHoldings(this.trades));
+      }
+    }, 15 * 60 * 1000);
+
+    // アプリに復帰した時（タブ再表示）に最新化
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && this.page === 'portfolio') {
+        YahooFinance.clearMemCache();
+        this._fetchQuotes(Portfolio.getHoldings(this.trades));
+      }
+    });
 
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('./sw.js').catch(() => {});
@@ -331,7 +348,9 @@ const App = {
       const btn = document.getElementById('refreshBtn');
       if (btn) btn.textContent = `取得中… ${done}/${total}`;
     }).then(quotes => {
-      Object.assign(this.quotes, quotes);
+      // 取得できたものだけ反映（失敗分は前回値を保持）
+      Object.entries(quotes).forEach(([code, q]) => { if (q) this.quotes[code] = q; });
+      this._saveQuoteCache();
     }).catch(() => Toast.show('株価の取得に失敗しました', 'error'))
       .finally(() => {
         this._fetching = false;
@@ -339,10 +358,18 @@ const App = {
       });
   },
 
+  // 前回取得した株価を端末に保存／復元（開いた瞬間に前回値を表示するため）
+  QUOTE_KEY: 'kabu_quote_cache_v1',
+  _saveQuoteCache() {
+    try { localStorage.setItem(this.QUOTE_KEY, JSON.stringify(this.quotes)); } catch {}
+  },
+  _loadQuoteCache() {
+    try { return JSON.parse(localStorage.getItem(this.QUOTE_KEY) ?? '{}') || {}; } catch { return {}; }
+  },
+
   async _refreshQuotes() {
-    YahooFinance.clearDivCache();
-    this.quotes = {};
-    this.renderPortfolio();
+    YahooFinance.clearMemCache();   // 株価のみ強制再取得（配当キャッシュは温存）
+    this.renderPortfolio();         // 前回値を表示したまま裏で最新取得
   },
 
   /* ============================================================
@@ -1035,6 +1062,66 @@ const App = {
     document.getElementById('f-shares')?.addEventListener('input',calc);
     document.getElementById('f-price')?.addEventListener('input',calc);
     document.getElementById('f-amount')?.addEventListener('input',function(){this._edited=true;});
+
+    // 銘柄コード ⇄ 銘柄名 の自動補完
+    let codeTimer, nameTimer;
+    document.getElementById('f-code')?.addEventListener('input', () => {
+      clearTimeout(codeTimer);
+      codeTimer = setTimeout(() => this._lookupByCode(), 500);
+    });
+    document.getElementById('f-name')?.addEventListener('input', () => {
+      clearTimeout(nameTimer);
+      nameTimer = setTimeout(() => this._lookupByName(), 600);
+    });
+  },
+
+  // 自分の取引履歴から作る辞書（コード⇄名前）。手早く確実。
+  _symbolDict() {
+    const c2n = {}, n2c = {};
+    this.trades.forEach(t => {
+      if (t.symbolCode && t.symbolName) { c2n[t.symbolCode] = t.symbolName; n2c[t.symbolName] = t.symbolCode; }
+    });
+    return { c2n, n2c };
+  },
+
+  async _lookupByCode() {
+    const codeEl = document.getElementById('f-code');
+    const nameEl = document.getElementById('f-name');
+    if (!codeEl || !nameEl) return;
+    const code = codeEl.value.trim();
+    if (!/^\d{4}$/.test(code)) return;
+    if (nameEl.value.trim() && !nameEl._auto) return;   // 手入力済みなら上書きしない
+
+    // ① まず自分の履歴から
+    const { c2n } = this._symbolDict();
+    if (c2n[code]) { nameEl.value = c2n[code]; nameEl._auto = true; return; }
+
+    // ② Yahooで検索
+    nameEl.placeholder = '銘柄名を取得中…';
+    const hits = await YahooFinance.searchSymbol(code + '.T');
+    const hit = hits.find(h => h.code === code) || hits[0];
+    nameEl.placeholder = '例: トヨタ自動車';
+    if (hit && (!nameEl.value.trim() || nameEl._auto)) { nameEl.value = hit.name; nameEl._auto = true; }
+  },
+
+  async _lookupByName() {
+    const codeEl = document.getElementById('f-code');
+    const nameEl = document.getElementById('f-name');
+    if (!codeEl || !nameEl) return;
+    const name = nameEl.value.trim();
+    nameEl._auto = false;                 // 名前を手入力したら自動フラグ解除
+    if (name.length < 2) return;
+    if (codeEl.value.trim()) return;       // コードが既にあるなら触らない
+
+    // ① 自分の履歴から（完全一致 or 部分一致）
+    const { n2c } = this._symbolDict();
+    if (n2c[name]) { codeEl.value = n2c[name]; return; }
+    const partial = Object.keys(n2c).find(k => k.includes(name) || name.includes(k));
+    if (partial) { codeEl.value = n2c[partial]; return; }
+
+    // ② Yahooで検索
+    const hits = await YahooFinance.searchSymbol(name);
+    if (hits[0] && !codeEl.value.trim()) codeEl.value = hits[0].code;
   },
 
   openModal(id=null) {
@@ -1062,6 +1149,7 @@ const App = {
       document.querySelectorAll('.side-btn').forEach((b,i)=>b.classList.toggle('active',i===0));
       const a=document.getElementById('f-amount'); if(a) a._edited=false;
     }
+    const nm=document.getElementById('f-name'); if(nm) nm._auto=false;
     document.querySelectorAll('.form-error').forEach(e=>e.textContent='');
     document.querySelectorAll('.form-input').forEach(e=>e.classList.remove('error'));
     document.getElementById('modalBackdrop').classList.add('open');
