@@ -866,6 +866,46 @@ const App = {
     return Papa.parse(sliced, { header: true, skipEmptyLines: 'greedy' });
   },
 
+  // SBI「保有証券一覧」CSV を解析。該当しなければ null。
+  // 口座区分はセクション見出し「株式（特定預り）」等から判定する。
+  _parseSBIHoldings(text) {
+    const rows = Papa.parse(text.replace(/\r/g, '').trim(), { skipEmptyLines: false }).data;
+    const looksLikeHoldings = rows.some(r => {
+      const j = (r || []).join(',');
+      return j.includes('保有株数') && j.includes('取得単価') && j.includes('銘柄');
+    });
+    if (!looksLikeHoldings) return null;
+
+    const today = new Date().toISOString().slice(0, 10);
+    const out = [];
+    let account = '特定', inData = false;
+    for (const r of rows) {
+      const c0 = String((r && r[0]) ?? '').trim();
+      if (!r || r.join('').trim() === '') { inData = false; continue; }
+      // セクション見出し：「株式（特定預り）」「株式（NISA預り）」等（「合計」行は除外）
+      const m = c0.match(/^株式（(.+?)）$/);
+      if (m && !/合計/.test(c0)) { account = Utils.mapAccount(m[1]); inData = false; continue; }
+      // データのヘッダー行
+      if (r.join(',').includes('銘柄コード') && r.join(',').includes('保有株数')) { inData = true; continue; }
+      if (!inData) continue;
+      // データ行： 銘柄コード,銘柄名称,保有株数,売却注文中,取得単価,現在値,取得金額,…
+      const code = c0.replace(/"/g, '').trim();
+      if (!/^\d{3,4}[A-Z]?$/.test(code)) continue;
+      const shares = Utils.num(r[2]);
+      const price  = Utils.num(r[4]);
+      const amount = Utils.num(r[6]);
+      if (!shares) continue;
+      out.push({
+        id: Utils.uid(), source: 'sbi-holdings',
+        symbolCode: code, symbolName: String(r[1] ?? '').replace(/"/g, '').trim(),
+        date: today, account, side: 'buy',
+        shares, price, amount: amount || Math.round(shares * price),
+        note: '保有CSV取込',
+      });
+    }
+    return out.length ? out : null;
+  },
+
   _processFiles(files) {
     const log = document.getElementById('importLog');
     log.style.display = 'block'; log.innerHTML = '';
@@ -877,6 +917,27 @@ const App = {
         // 文字コード判定（Shift-JIS優先、文字化けしたらUTF-8）
         let text = new TextDecoder('shift-jis').decode(reader.result);
         if (/�/.test(text)) text = new TextDecoder('utf-8', { fatal: false }).decode(reader.result);
+
+        // ★ SBI「保有証券一覧」CSV を先に判定（取引履歴ではなく保有スナップショット）
+        const holdings = this._parseSBIHoldings(text);
+        if (holdings) {
+          add(`📊 SBI 保有証券一覧CSV と判定 / ${holdings.length} 銘柄`);
+          const mode = document.getElementById('importMode')?.value ?? 'append';
+          if (mode === 'replace') {
+            if (!confirm(`「上書き」モードです。\n既存の ${this.trades.length} 件を全削除し、保有CSVの ${holdings.length} 銘柄に入れ替えます。\nよろしいですか？`)) { add('⏹ 上書きをキャンセルしました'); return; }
+            this.trades = holdings;
+          } else {
+            const exist = new Set(this.trades.map(deduplicateKey));
+            const fresh = holdings.filter(r => !exist.has(deduplicateKey(r)));
+            this.trades = this.trades.concat(fresh);
+            add(`<span class="text-muted">追加 ${fresh.length} 件 / 重複スキップ ${holdings.length - fresh.length} 件</span>`);
+          }
+          TradeStorage.save(this.trades);
+          add(`✅ 保有 ${holdings.length} 銘柄を取込みました`, 'log-ok');
+          add('<span class="text-muted">※保有CSVは日付が無いため、本日付の「買い」として登録しています（過去の売買・配当履歴は含まれません）。</span>');
+          Toast.show(`SBI保有: ${holdings.length} 銘柄を取込`, 'success');
+          return;
+        }
 
         const parsed = this._parseCSV(text);
         const fields = (parsed.meta.fields ?? []).map(f => String(f).trim());
