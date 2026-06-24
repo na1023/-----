@@ -261,10 +261,13 @@ const App = {
       <div class="card">
         <div class="card-header">
           <span class="card-title">保有銘柄一覧</span>
-          <button class="btn btn-sm btn-ghost" onclick="App._refreshQuotes()" id="refreshBtn">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
-            株価更新
-          </button>
+          <div style="display:flex;align-items:center;gap:12px">
+            ${(() => { const t = Object.values(this.quotes).find(q => q?.updatedAt)?.updatedAt; return t ? `<span style="font-size:.75rem;color:var(--c-text-3)">最終取得: ${t}</span>` : ''; })()}
+            <button class="btn btn-sm btn-ghost" onclick="App._refreshQuotes()" id="refreshBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
+              株価更新
+            </button>
+          </div>
         </div>
         <!-- PC table -->
         <div class="portfolio-table-wrap">
