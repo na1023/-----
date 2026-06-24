@@ -115,7 +115,16 @@ const App = {
     this._setupSidebar();
     this._setupModal();
     this._setupNav();
-    this.navigate('dashboard');
+
+    const VALID = ['dashboard','portfolio','dividends','annual','history','charts','import','settings'];
+    const initPage = location.hash.slice(1);
+    this.navigate(VALID.includes(initPage) ? initPage : 'dashboard');
+
+    window.addEventListener('hashchange', () => {
+      const p = location.hash.slice(1);
+      if (VALID.includes(p) && p !== this.page) this.navigate(p);
+    });
+
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('./sw.js').catch(() => {});
     }
@@ -145,6 +154,7 @@ const App = {
   navigate(page) {
     if (!page) return;
     this.page = page;
+    if (location.hash.slice(1) !== page) location.hash = page;
     ChartMgr.destroyAll();
     document.querySelectorAll('.nav-item,.bnav-item[data-page]').forEach(el => el.classList.toggle('active', el.dataset.page === page));
     document.getElementById('pageTitle').textContent = this._TITLES[page] ?? page;
@@ -205,10 +215,13 @@ const App = {
     const holdings = Portfolio.getHoldings(this.trades);
     if (!holdings.length) { this.html(`<div class="card"><div class="card-body">${this._empty('保有銘柄なし','取引を登録すると保有銘柄が表示されます')}</div></div>`); return; }
 
+    const fetching = this._fetching;
+    const NO_DATA  = `<span class="no-data-pill">${fetching ? '<span class="dot-loading"></span>取得中' : 'データ未取得'}</span>`;
+
     const tbody = holdings.map(h => {
       const q = this.quotes[h.symbolCode];
-      const priceTd   = q ? `<span class="fw7">${Utils.yen(q.price)}</span>` : `<span class="skeleton"></span>`;
-      const changeTd  = q ? `<span class="${q.changePct>=0?'change-pos':'change-neg'}">${q.changePct>=0?'▲':'▼'}${Math.abs(q.changePct).toFixed(2)}%</span>` : '—';
+      const priceTd   = q ? `<span class="fw7">${Utils.yen(q.price)}</span>` : NO_DATA;
+      const changeTd  = q ? `<span class="${q.changePct>=0?'change-pos':'change-neg'}">${q.changePct>=0?'▲':'▼'}${Math.abs(q.changePct).toFixed(2)}%</span>` : '';
       const evalAmt   = q ? h.shares * q.price : null;
       const evalPnl   = q ? evalAmt - h.totalCost : null;
       const evalPct   = q && h.totalCost > 0 ? (evalPnl / h.totalCost) * 100 : null;
@@ -217,9 +230,9 @@ const App = {
         <td class="r">${h.shares.toLocaleString()}</td>
         <td class="r">${Utils.yen(h.avgCost)}</td>
         <td class="r"><div class="price-change">${priceTd}</div><div class="price-change">${changeTd}</div></td>
-        <td class="r">${evalAmt != null ? Utils.yen(evalAmt) : '<span class="skeleton"></span>'}</td>
+        <td class="r">${evalAmt != null ? Utils.yen(evalAmt) : NO_DATA}</td>
         <td class="r ${evalPnl==null?'':evalPnl>=0?'text-pos':'text-neg'}" style="font-weight:700">
-          ${evalPnl != null ? `${evalPnl>=0?'+':''}${Utils.yen(evalPnl)}<div style="font-size:.75rem;font-weight:500">(${evalPct>=0?'+':''}${evalPct?.toFixed(2)}%)</div>` : '<span class="skeleton"></span>'}
+          ${evalPnl != null ? `${evalPnl>=0?'+':''}${Utils.yen(evalPnl)}<div style="font-size:.75rem;font-weight:500">(${evalPct>=0?'+':''}${evalPct?.toFixed(2)}%)</div>` : NO_DATA}
         </td>
         <td class="r">${Utils.yen(h.totalCost)}</td>
       </tr>`;
@@ -262,7 +275,7 @@ const App = {
         <div class="card-header">
           <span class="card-title">保有銘柄一覧</span>
           <div style="display:flex;align-items:center;gap:12px">
-            ${(() => { const t = Object.values(this.quotes).find(q => q?.updatedAt)?.updatedAt; return t ? `<span style="font-size:.75rem;color:var(--c-text-3)">最終取得: ${t}</span>` : ''; })()}
+            ${(q => q ? `<span style="font-size:.75rem;color:var(--c-text-3)">最終取得: ${q}</span>` : '')(Object.values(this.quotes).map(q => q?.updatedAt).find(Boolean) ?? '')}
             <button class="btn btn-sm btn-ghost" onclick="App._refreshQuotes()" id="refreshBtn">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
               株価更新
@@ -290,13 +303,18 @@ const App = {
   async _fetchQuotes(holdings) {
     const codes = holdings.filter(h => Portfolio.isValidCode(h.symbolCode)).map(h => h.symbolCode);
     if (!codes.length) return;
+    this._fetching = true;
+    if (this.page === 'portfolio') this.renderPortfolio();
     await YahooFinance.getQuotes(codes, (done, total) => {
       const btn = document.getElementById('refreshBtn');
       if (btn) btn.textContent = `取得中… ${done}/${total}`;
     }).then(quotes => {
       Object.assign(this.quotes, quotes);
-      if (this.page === 'portfolio') this.renderPortfolio();
-    }).catch(() => Toast.show('株価の取得に失敗しました', 'error'));
+    }).catch(() => Toast.show('株価の取得に失敗しました', 'error'))
+      .finally(() => {
+        this._fetching = false;
+        if (this.page === 'portfolio') this.renderPortfolio();
+      });
   },
 
   async _refreshQuotes() {
