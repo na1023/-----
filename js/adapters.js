@@ -3,7 +3,10 @@
    ============================================================ */
 
 const Utils = {
-  num: s => Number(String(s ?? '').replace(/[^\d.-]/g, '')) || 0,
+  num:  s  => Number(String(s ?? '').replace(/[^\d.-]/g, '')) || 0,
+  yen:  n  => '¥' + Math.round(Math.abs(n)).toLocaleString('ja-JP'),
+  uid:  () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+  fmtDate: s => s ? s.replace(/-/g, '/') : '',
   toISO(s) {
     const m = String(s ?? '').trim().match(/(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})/);
     return m ? `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}` : String(s ?? '').trim();

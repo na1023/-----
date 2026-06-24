@@ -1,0 +1,14 @@
+{
+  "name": "株式取引管理",
+  "short_name": "株式管理",
+  "description": "株式取引履歴・損益・配当を管理するアプリ",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#2563eb",
+  "orientation": "any",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
