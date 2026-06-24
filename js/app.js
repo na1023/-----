@@ -378,26 +378,36 @@ const App = {
   async renderDividends() {
     const holdings = Portfolio.getHoldings(this.trades);
     const validHoldings = holdings.filter(h => Portfolio.isValidCode(h.symbolCode));
-
-    this.html(`<div style="display:flex;align-items:center;gap:12px;color:var(--c-text-3);padding:40px;justify-content:center">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20" style="animation:spin 1s linear infinite"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
-      配当データを取得中…</div>
-      <style>@keyframes spin{to{transform:rotate(360deg)}}</style>`);
-
-    if (validHoldings.length) {
-      for (const h of validHoldings) {
-        try { this.divData[h.symbolCode] = await YahooFinance.getDividends(h.symbolCode); }
-        catch { this.divData[h.symbolCode] = []; }
-      }
-    }
-
-    // 株価も取得（利回り計算用）
     const codes = validHoldings.map(h => h.symbolCode);
-    if (codes.length) {
-      await YahooFinance.getQuotes(codes).then(q => Object.assign(this.quotes, q)).catch(() => {});
+
+    // ① まずキャッシュで即描画（ネット待ちしない）
+    codes.forEach(c => { if (!this.divData[c]) { const d = YahooFinance.getDividendsCached(c); if (d) this.divData[c] = d; } });
+    this._renderDividendUI(holdings);
+
+    // ② 未取得の配当だけ裏で並列取得 → 取れたら静かに再描画
+    const missing = codes.filter(c => !this.divData[c]);
+    if (missing.length) {
+      this._setDivLoading(true);
+      YahooFinance.getDividendsMany(missing).then(res => {
+        Object.assign(this.divData, res);
+        this._setDivLoading(false);
+        if (this.page === 'dividends') this._renderDividendUI(Portfolio.getHoldings(this.trades));
+      }).catch(() => this._setDivLoading(false));
     }
 
-    this._renderDividendUI(holdings);
+    // ③ 株価は保有ページのキャッシュを流用。無ければ裏で取得
+    if (codes.some(c => !this.quotes[c])) {
+      YahooFinance.getQuotes(codes).then(q => {
+        Object.entries(q).forEach(([c, v]) => { if (v) this.quotes[c] = v; });
+        this._saveQuoteCache();
+        if (this.page === 'dividends') this._renderDividendUI(Portfolio.getHoldings(this.trades));
+      }).catch(() => {});
+    }
+  },
+
+  _setDivLoading(on) {
+    const el = document.getElementById('divLoadingBadge');
+    if (el) el.style.display = on ? 'inline-flex' : 'none';
   },
 
   _renderDividendUI(holdings) {
@@ -488,7 +498,9 @@ const App = {
     this.html(`
       <div class="div-header">
         <div class="div-kpi-main">
-          <div class="div-kpi-label">年間受取配当（${year}年）</div>
+          <div class="div-kpi-label">年間受取配当（${year}年）
+            <span id="divLoadingBadge" style="display:none;align-items:center;gap:4px;margin-left:6px;font-size:.7rem"><span class="dot-loading"></span>更新中</span>
+          </div>
           <div class="div-kpi-amount">${Utils.yen(total)}</div>
           <div class="div-kpi-sub">${tax==='before'?'税引前':'税引後（20.315%控除）'} &ensp; ${yearRecs.length}回受取</div>
         </div>
@@ -799,8 +811,15 @@ const App = {
         <div class="card">
           <div class="card-header"><span class="card-title">CSVファイル取込</span></div>
           <div class="card-body" style="display:flex;flex-direction:column;gap:14px">
-            <div><label class="form-label" style="margin-bottom:5px;display:block">証券会社</label>
-              <select class="form-select" id="brokerSel"><option value="auto">自動判定（推奨）</option><option value="SBI">SBI証券</option><option value="Rakuten">楽天証券</option><option value="Matsui">松井証券</option><option value="Monex">マネックス証券</option></select></div>
+            <div style="display:flex;gap:12px;flex-wrap:wrap">
+              <div style="flex:1;min-width:140px"><label class="form-label" style="margin-bottom:5px;display:block">証券会社</label>
+                <select class="form-select" id="brokerSel"><option value="auto">自動判定（推奨）</option><option value="SBI">SBI証券</option><option value="Rakuten">楽天証券</option><option value="Matsui">松井証券</option><option value="Monex">マネックス証券</option></select></div>
+              <div style="flex:1;min-width:140px"><label class="form-label" style="margin-bottom:5px;display:block">取込モード</label>
+                <select class="form-select" id="importMode">
+                  <option value="append">追加（重複はスキップ）</option>
+                  <option value="replace">上書き（既存を全削除して入替）</option>
+                </select></div>
+            </div>
             <div class="dropzone" id="dz">
               <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
               <p style="font-weight:600;color:var(--c-text-2)">クリック / ドラッグ&amp;ドロップ</p>
@@ -880,13 +899,23 @@ const App = {
           console.log('CSV fields:', fields, 'sample row:', parsed.data[0]);
           return;
         }
-        const exist = new Set(this.trades.map(deduplicateKey));
-        const fresh = recs.filter(r => !exist.has(deduplicateKey(r)));
-        this.trades = this.trades.concat(fresh);
-        TradeStorage.save(this.trades);
-        add(`✅ ${fresh.length} 件取込（重複スキップ: ${recs.length-fresh.length} 件）`, 'log-ok');
-        Toast.show(`${broker}: ${fresh.length} 件取込みました`, 'success');
-        if (this.page === 'import') {} // 一覧は履歴ページで確認
+        const mode = document.getElementById('importMode')?.value ?? 'append';
+        if (mode === 'replace') {
+          if (!confirm(`「上書き」モードです。\n既存の ${this.trades.length} 件をすべて削除し、このCSVの ${recs.length} 件に入れ替えます。\nよろしいですか？`)) {
+            add('⏹ 上書きをキャンセルしました'); return;
+          }
+          this.trades = recs;
+          TradeStorage.save(this.trades);
+          add(`✅ ${recs.length} 件で上書きしました`, 'log-ok');
+          Toast.show(`${broker}: ${recs.length} 件で上書き`, 'success');
+        } else {
+          const exist = new Set(this.trades.map(deduplicateKey));
+          const fresh = recs.filter(r => !exist.has(deduplicateKey(r)));
+          this.trades = this.trades.concat(fresh);
+          TradeStorage.save(this.trades);
+          add(`✅ ${fresh.length} 件追加（重複スキップ: ${recs.length-fresh.length} 件）`, 'log-ok');
+          Toast.show(`${broker}: ${fresh.length} 件追加`, 'success');
+        }
       };
       reader.readAsArrayBuffer(file);
     });

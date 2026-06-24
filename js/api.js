@@ -143,5 +143,5 @@ const YahooFinance = (() => {
     } catch { return []; }
   }
 
-  return { getQuote, getQuotes, getDividends, clearDivCache, clearMemCache, searchSymbol };
+  return { getQuote, getQuotes, getDividends, getDividendsCached, getDividendsMany, clearDivCache, clearMemCache, searchSymbol };
 })();

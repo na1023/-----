@@ -13,14 +13,20 @@ const Utils = {
   },
   mapSide: raw => /買|buy/i.test(raw ?? '') ? 'buy' : 'sell',
   mapAccount(raw) {
-    const map = {
-      '特定預り':'特定','特定口座':'特定','特定':'特定',
-      '一般預り':'一般','一般口座':'一般','一般':'一般',
-      'NISA預り':'NISA','NISA':'NISA','ニーサ':'NISA',
-      '成長投資枠':'新NISA成長','つみたて投資枠':'新NISA積立',
-      '新NISA':'新NISA成長',
-    };
-    return map[String(raw ?? '').trim()] ?? '一般';
+    const s = String(raw ?? '').trim();
+    if (!s) return '特定';
+    // 新NISA（枠の区別が最優先）
+    if (/成長投資枠|成長枠/.test(s))             return '新NISA成長';
+    if (/つみたて投資枠|つみたて枠|積立投資枠|積立枠/.test(s)) return '新NISA積立';
+    // NISA（新NISA表記もここで成長扱い）
+    if (/NISA|ニーサ/i.test(s)) {
+      if (/つみたて|積立/.test(s)) return '新NISA積立';
+      if (/成長|新/.test(s))       return '新NISA成長';
+      return 'NISA';
+    }
+    if (/特定/.test(s)) return '特定';
+    if (/一般/.test(s)) return '一般';
+    return '特定';   // 不明時は最も一般的な特定に（旧仕様の一般デフォルトを変更）
   },
   uid: () => Date.now().toString(36) + Math.random().toString(36).slice(2,7),
   yen: n => '¥' + Math.round(Math.abs(n)).toLocaleString('ja-JP'),
