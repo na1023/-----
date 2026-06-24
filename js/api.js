@@ -18,7 +18,7 @@ const YahooFinance = (() => {
     for (const proxy of PROXIES) {
       try {
         const ctrl = new AbortController();
-        const tid  = setTimeout(() => ctrl.abort(), 10000);
+        const tid  = setTimeout(() => ctrl.abort(), 7000);
         const res  = await fetch(proxy(url), { signal: ctrl.signal });
         clearTimeout(tid);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);

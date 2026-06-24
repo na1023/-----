@@ -119,9 +119,12 @@ svg{display:block}
 /* Bottom nav */
 .bottom-nav{
   display:none;position:fixed;bottom:0;left:0;right:0;
+  align-items:center;
   height:calc(var(--bnav-h) + env(safe-area-inset-bottom,0px));
   background:var(--c-surface);border-top:1px solid var(--c-border);
   z-index:100;padding-bottom:env(safe-area-inset-bottom,0);
+  /* iOSで position:fixed が崩れないよう明示 */
+  transform:translateZ(0);will-change:auto;
 }
 .bottom-nav>*{display:flex}
 .bnav-item{

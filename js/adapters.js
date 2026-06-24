@@ -31,23 +31,30 @@ const Utils = {
   uid: () => Date.now().toString(36) + Math.random().toString(36).slice(2,7),
   yen: n => '¥' + Math.round(Math.abs(n)).toLocaleString('ja-JP'),
   formatDate: s => s ? s.replace(/-/g, '/') : '',
+  // 列名のゆらぎに対応：候補名のうち最初に見つかった値を返す（前後空白・全半角空白を無視）
+  pick(row, names) {
+    for (const n of names) {
+      if (row[n] != null && String(row[n]).trim() !== '') return row[n];
+    }
+    return '';
+  },
 };
 
 const BrokerAdapters = {
   SBI: {
-    signature: ['約定日','銘柄コード','預り区分','約定数量'],
+    signature: ['約定日','銘柄コード','約定数量'],
     encode: 'shift-jis',
     skipRows: 0,
     map: {
-      symbolCode: r => r['銘柄コード'] ?? '',
-      symbolName: r => r['銘柄'] ?? r['銘柄名'] ?? '',
-      date:        r => Utils.toISO(r['約定日']),
-      account:     r => Utils.mapAccount(r['預り区分']),
-      side:        r => Utils.mapSide(r['取引']),
-      shares:      r => Utils.num(r['約定数量']),
-      price:       r => Utils.num(r['約定単価']),
-      amount:      r => Utils.num(r['受渡金額']),
-      note:        r => r['備考'] ?? '',
+      symbolCode: r => Utils.pick(r, ['銘柄コード','コード']),
+      symbolName: r => Utils.pick(r, ['銘柄','銘柄名']),
+      date:        r => Utils.toISO(Utils.pick(r, ['約定日','受渡日','取引日'])),
+      account:     r => Utils.mapAccount(Utils.pick(r, ['預り','預り区分','口座','口座区分'])),
+      side:        r => Utils.mapSide(Utils.pick(r, ['取引','売買','取引区分'])),
+      shares:      r => Utils.num(Utils.pick(r, ['約定数量','数量','株数'])),
+      price:       r => Utils.num(Utils.pick(r, ['約定単価','単価'])),
+      amount:      r => Utils.num(Utils.pick(r, ['受渡金額/決済損益','受渡金額','受渡金額／決済損益','決済損益'])),
+      note:        r => Utils.pick(r, ['備考','摘要']),
     },
   },
   Rakuten: {
@@ -113,8 +120,11 @@ function detectBroker(headers) {
 function normalizeCSV(rows, broker) {
   const { map } = BrokerAdapters[broker];
   return rows.map(row => {
+    // 列名の前後空白を除去（"銘柄コード "等のゆらぎ対策）
+    const r = {};
+    for (const k in row) r[String(k).trim()] = row[k];
     const rec = { id: Utils.uid(), source: broker.toLowerCase() };
-    for (const key in map) rec[key] = map[key](row);
+    for (const key in map) rec[key] = map[key](r);
     return rec;
   }).filter(r => r.date && r.symbolName && r.shares > 0);
 }
