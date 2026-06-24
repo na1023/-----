@@ -62,23 +62,12 @@ const Sync = {
 
     const provider = new firebase.auth.GoogleAuthProvider();
 
-    // モバイル / PWA はリダイレクト、PCはポップアップが快適
-    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
-      || window.matchMedia('(display-mode: standalone)').matches
-      || window.navigator.standalone === true;
-
+    // iOS Safari ではリダイレクト方式が完了できない不具合があるため、
+    // 全環境でポップアップ方式を優先する（クリック直後なのでブロックされにくい）
     try {
-      if (isMobile) {
-        await this.auth.signInWithRedirect(provider);
-      } else {
-        await this.auth.signInWithPopup(provider);
-      }
+      await this.auth.signInWithPopup(provider);
     } catch (e) {
       console.error(e);
-      // ポップアップが塞がれたらリダイレクトで再挑戦
-      if (['auth/popup-blocked','auth/cancelled-popup-request','auth/popup-closed-by-user'].includes(e.code)) {
-        try { await this.auth.signInWithRedirect(provider); return; } catch (e2) { console.error(e2); }
-      }
       if (e.code === 'auth/operation-not-supported-in-this-environment') {
         Toast.show('この環境ではGoogleログインを使えません。通常のブラウザ(Safari/Chrome)の https URL で開くか、メール＋パスワードをご利用ください。', 'error', 7000);
       } else if (e.code === 'auth/unauthorized-domain') {

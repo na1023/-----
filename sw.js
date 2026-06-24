@@ -1,4 +1,4 @@
-const CACHE = 'kabu-v5';
+const CACHE = 'kabu-v7';
 const ASSETS = [
   './index.html',
   './style.css',
@@ -32,11 +32,16 @@ self.addEventListener('fetch', e => {
       || url.hostname.includes('googleapis.com') || url.hostname.includes('firebase') || url.hostname.includes('gstatic.com')) {
     return;
   }
-  // Static assets → cache first, fallback network
+  // アプリのファイル → ネット優先（最新を取得、失敗時のみキャッシュ）
   e.respondWith(
-    caches.match(e.request).then(cached => cached ?? fetch(e.request).then(res => {
-      if (res.ok) caches.open(CACHE).then(c => c.put(e.request, res.clone()));
-      return res;
-    }))
+    fetch(e.request)
+      .then(res => {
+        if (res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then(c => c.put(e.request, copy));
+        }
+        return res;
+      })
+      .catch(() => caches.match(e.request))
   );
 });
