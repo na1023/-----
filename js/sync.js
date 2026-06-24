@@ -53,16 +53,39 @@ const Sync = {
   /* ---- ログイン操作 ---- */
   async loginGoogle() {
     if (!this.auth) return;
+
+    // file:// やストレージ無効の環境では Google ログイン不可
+    if (location.protocol !== 'http:' && location.protocol !== 'https:') {
+      Toast.show('この開き方ではGoogleログインを使えません。https のURL（GitHub Pages）で開いてください。', 'error', 6000);
+      return;
+    }
+
     const provider = new firebase.auth.GoogleAuthProvider();
+
+    // モバイル / PWA はリダイレクト、PCはポップアップが快適
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+      || window.matchMedia('(display-mode: standalone)').matches
+      || window.navigator.standalone === true;
+
     try {
-      await this.auth.signInWithPopup(provider);
+      if (isMobile) {
+        await this.auth.signInWithRedirect(provider);
+      } else {
+        await this.auth.signInWithPopup(provider);
+      }
     } catch (e) {
-      // ポップアップが使えない端末はリダイレクト方式へ
-      if (['auth/popup-blocked','auth/operation-not-supported-in-this-environment','auth/cancelled-popup-request','auth/popup-closed-by-user'].includes(e.code)) {
+      console.error(e);
+      // ポップアップが塞がれたらリダイレクトで再挑戦
+      if (['auth/popup-blocked','auth/cancelled-popup-request','auth/popup-closed-by-user'].includes(e.code)) {
         try { await this.auth.signInWithRedirect(provider); return; } catch (e2) { console.error(e2); }
       }
-      console.error(e);
-      Toast.show('Googleログインに失敗しました: ' + (e.code || e.message), 'error', 5000);
+      if (e.code === 'auth/operation-not-supported-in-this-environment') {
+        Toast.show('この環境ではGoogleログインを使えません。通常のブラウザ(Safari/Chrome)の https URL で開くか、メール＋パスワードをご利用ください。', 'error', 7000);
+      } else if (e.code === 'auth/unauthorized-domain') {
+        Toast.show('このドメインが未許可です。Firebaseの「承認済みドメイン」にサイトのドメインを追加してください。', 'error', 7000);
+      } else {
+        Toast.show('Googleログインに失敗しました: ' + (e.code || e.message), 'error', 6000);
+      }
     }
   },
 
