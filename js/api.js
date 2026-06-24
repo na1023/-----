@@ -50,18 +50,21 @@ const YahooFinance = (() => {
     };
   }
 
-  /* 複数銘柄を順次取得 */
+  /* 複数銘柄を並列取得（同時4件まで） */
   async function getQuotes(codes, onProgress) {
     const results = {};
-    for (let i = 0; i < codes.length; i++) {
-      const code = codes[i];
-      try {
-        results[code] = await getQuote(code);
-      } catch {
-        results[code] = null;
+    let i = 0, done = 0;
+    const CONC = 4;
+    async function worker() {
+      while (i < codes.length) {
+        const code = codes[i++];
+        try { results[code] = await getQuote(code); }
+        catch { results[code] = null; }
+        done++;
+        if (onProgress) onProgress(done, codes.length);
       }
-      if (onProgress) onProgress(i + 1, codes.length);
     }
+    await Promise.all(Array.from({ length: Math.min(CONC, codes.length) }, worker));
     return results;
   }
 
@@ -85,6 +88,30 @@ const YahooFinance = (() => {
     cache[code] = { data: divs, ts: Date.now() };
     saveDivCache(cache);
     return divs;
+  }
+
+  /* 即時にキャッシュだけ返す（ネット待ちなし） */
+  function getDividendsCached(code) {
+    const cache = loadDivCache();
+    return cache[code]?.data ?? null;
+  }
+
+  /* 複数銘柄の配当を並列取得（同時4件） */
+  async function getDividendsMany(codes, onProgress) {
+    const results = {};
+    let i = 0, done = 0;
+    const CONC = 4;
+    async function worker() {
+      while (i < codes.length) {
+        const code = codes[i++];
+        try { results[code] = await getDividends(code); }
+        catch { results[code] = []; }
+        done++;
+        if (onProgress) onProgress(done, codes.length);
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONC, codes.length) }, worker));
+    return results;
   }
 
   /* キャッシュ強制更新 */
