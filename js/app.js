@@ -881,61 +881,85 @@ const App = {
   },
 
   _syncCard() {
-    const S = (typeof Sync !== 'undefined') ? Sync : { status: 'unconfigured', code: null };
+    const S = (typeof Sync !== 'undefined') ? Sync : { status: 'unconfigured' };
 
     if (S.status === 'unconfigured') {
       return `<div class="card" style="border-color:#fcd34d">
-        <div class="card-header"><span class="card-title">☁️ クラウド同期（未設定）</span></div>
+        <div class="card-header"><span class="card-title">☁️ アカウント（未設定）</span></div>
         <div class="card-body" style="font-size:.875rem;line-height:1.7">
-          <div class="fetch-banner fetch-banner-warn" style="margin-bottom:12px">
-            Firebaseが未設定のため、データはこの端末内にのみ保存されています。
+          <div class="fetch-banner fetch-banner-warn" style="margin-bottom:0">
+            ログイン機能が読み込めませんでした。通信環境を確認してアプリを開き直してください。
           </div>
-          <p style="font-weight:700;margin-bottom:6px">複数端末で同期するための設定手順</p>
-          <ol style="padding-left:1.2em;display:flex;flex-direction:column;gap:5px">
-            <li><a href="https://console.firebase.google.com/" target="_blank" rel="noopener" style="color:var(--c-primary)">Firebaseコンソール</a>で「プロジェクトを作成」（無料・クレカ不要）</li>
-            <li>「Firestore Database」→「データベースを作成」→<b>テストモード</b>で開始</li>
-            <li>プロジェクト設定 → 「マイアプリ」でウェブアプリ（&lt;/&gt;）を追加</li>
-            <li>表示された <code>firebaseConfig</code> の中身を <code>js/firebase-config.js</code> に貼り付けて保存</li>
-            <li>GitHubに再アップロード → アプリを開き直す</li>
-          </ol>
         </div>
       </div>`;
     }
 
     if (S.status === 'on') {
+      const u    = S.user || {};
+      const name = u.displayName || u.email || 'ログイン中';
+      const photo = u.photoURL
+        ? `<img src="${u.photoURL}" alt="" style="width:40px;height:40px;border-radius:50%;flex-shrink:0">`
+        : `<div style="width:40px;height:40px;border-radius:50%;background:var(--c-primary);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0">${this.esc((name[0]||'U').toUpperCase())}</div>`;
       return `<div class="card" style="border-color:#86efac">
-        <div class="card-header"><span class="card-title">☁️ クラウド同期</span>
+        <div class="card-header"><span class="card-title">☁️ アカウント</span>
           <span class="sync-status sync-on">● 同期中</span></div>
         <div class="card-body" style="font-size:.875rem">
-          <div class="fetch-banner" style="background:#f0fdf4;border:1.5px solid #86efac;color:#166534;margin-bottom:12px">
-            この合言葉で自動同期しています。<b>別の端末でも同じ合言葉を入力</b>すると、データが共有されます。
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
+            ${photo}
+            <div style="min-width:0">
+              <div class="fw7" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${this.esc(name)}</div>
+              ${u.email && u.displayName ? `<div class="text-xs text-muted" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${this.esc(u.email)}</div>` : ''}
+            </div>
           </div>
-          <div class="pnl-row"><span class="pnl-label">合言葉</span><span class="fw7" style="font-family:monospace;letter-spacing:1px">${this.esc(S.code)}</span></div>
-          <button class="btn btn-ghost" style="margin-top:12px;width:100%" onclick="Sync.disconnect()">同期を停止する</button>
+          <div class="fetch-banner" style="background:#f0fdf4;border:1.5px solid #86efac;color:#166534;margin-bottom:12px">
+            データはこのアカウントに紐づいて保存されています。<b>他の端末でも同じアカウントでログイン</b>すれば自動で同期されます。
+          </div>
+          <button class="btn btn-ghost" style="width:100%" onclick="Sync.logout()">ログアウト</button>
         </div>
       </div>`;
     }
 
-    // status: 'off' or 'error'  → 接続フォーム
+    // signedout / error → ログインフォーム
     const errBanner = S.status === 'error'
-      ? `<div class="fetch-banner fetch-banner-warn" style="margin-bottom:12px">接続でエラーが発生しました。合言葉やFirebase設定を確認してください。</div>` : '';
+      ? `<div class="fetch-banner fetch-banner-warn" style="margin-bottom:12px">接続でエラーが発生しました。少し待ってから再度お試しください。</div>` : '';
     return `<div class="card">
-      <div class="card-header"><span class="card-title">☁️ クラウド同期</span>
-        <span class="sync-status sync-off">○ 未接続</span></div>
+      <div class="card-header"><span class="card-title">☁️ ログイン / 新規登録</span>
+        <span class="sync-status sync-off">○ 未ログイン</span></div>
       <div class="card-body" style="font-size:.875rem">
         ${errBanner}
-        <p style="margin-bottom:10px;color:var(--c-text-2)">好きな<b>合言葉</b>を決めて入力してください。<br>他の端末でも<b>同じ合言葉</b>を入れると、データが自動で同期されます。</p>
-        <input class="form-input" id="syncCodeInput" type="text" placeholder="例: kabu-taro-2024" autocapitalize="off" autocomplete="off" style="margin-bottom:10px">
-        <button class="btn btn-primary" style="width:100%" onclick="App._connectSync()">この合言葉で同期を開始</button>
-        <p class="text-xs text-muted" style="margin-top:8px">※ 推測されにくい合言葉にしてください（合言葉を知る人は誰でもデータを見られます）</p>
+        <p style="margin-bottom:12px;color:var(--c-text-2)">ログインすると、データがクラウドに保存され、<b>PC・スマホで自動同期</b>されます。</p>
+
+        <button class="btn" style="width:100%;border:1.5px solid var(--c-border);background:#fff;display:flex;align-items:center;justify-content:center;gap:10px;font-weight:600" onclick="Sync.loginGoogle()">
+          <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.5 6.5 29.5 4.5 24 4.5 13.2 4.5 4.5 13.2 4.5 24S13.2 43.5 24 43.5 43.5 34.8 43.5 24c0-1.2-.1-2.3-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.5 6.5 29.5 4.5 24 4.5 16.3 4.5 9.7 8.9 6.3 14.7z"/><path fill="#4CAF50" d="M24 43.5c5.4 0 10.3-2.1 14-5.5l-6.5-5.5c-2 1.5-4.6 2.5-7.5 2.5-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.6 39 16.2 43.5 24 43.5z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.2 4.3-4.1 5.6l6.5 5.5c-.5.4 7-5.1 7-15.1 0-1.2-.1-2.3-.4-3.5z"/></svg>
+          Googleでログイン
+        </button>
+
+        <div style="display:flex;align-items:center;gap:10px;margin:16px 0;color:var(--c-text-3);font-size:.8rem">
+          <div style="flex:1;height:1px;background:var(--c-border)"></div>または<div style="flex:1;height:1px;background:var(--c-border)"></div>
+        </div>
+
+        <input class="form-input" id="authEmail" type="email" placeholder="メールアドレス" autocapitalize="off" autocomplete="email" style="margin-bottom:8px">
+        <input class="form-input" id="authPw" type="password" placeholder="パスワード（6文字以上）" autocomplete="current-password" style="margin-bottom:10px">
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary" style="flex:1" onclick="App._loginEmail()">ログイン</button>
+          <button class="btn btn-ghost" style="flex:1;border:1.5px solid var(--c-border)" onclick="App._signupEmail()">新規登録</button>
+        </div>
+        <p class="text-xs text-muted" style="margin-top:10px">初めての方は「新規登録」、登録済みの方は「ログイン」を押してください。</p>
       </div>
     </div>`;
   },
 
-  _connectSync() {
-    const v = document.getElementById('syncCodeInput')?.value?.trim();
-    if (!v) { Toast.show('合言葉を入力してください', 'error'); return; }
-    Sync.connect(v, false);
+  _loginEmail() {
+    const email = document.getElementById('authEmail')?.value?.trim();
+    const pw    = document.getElementById('authPw')?.value;
+    if (!email || !pw) { Toast.show('メールアドレスとパスワードを入力してください', 'error'); return; }
+    Sync.loginEmail(email, pw);
+  },
+  _signupEmail() {
+    const email = document.getElementById('authEmail')?.value?.trim();
+    const pw    = document.getElementById('authPw')?.value;
+    if (!email || !pw) { Toast.show('メールアドレスとパスワードを入力してください', 'error'); return; }
+    Sync.signupEmail(email, pw);
   },
 
   _exportData() { TradeStorage.exportJSON(this.trades); Toast.show('バックアップを保存しました','success'); },

@@ -1,19 +1,19 @@
 'use strict';
 
 /* ============================================================
-   Sync — Firebase Firestore によるクラウド同期
-   合言葉(syncCode)をキーに、複数端末で同じデータを共有する。
-   ログイン不要・無料(Sparkプラン)。
+   Sync — Firebase Authentication + Firestore
+   各ユーザーがログインし、自分専用のデータをクラウドに保存・同期する。
+   ログイン方法： Googleアカウント / メール+パスワード
+   保存先： portfolios/{uid}
    ============================================================ */
 const Sync = {
   db:     null,
-  code:   null,
+  auth:   null,
+  user:   null,
   unsub:  null,
-  status: 'off',   // 'off' | 'on' | 'unconfigured' | 'error'
+  status: 'off',   // 'unconfigured' | 'signedout' | 'on' | 'error'
   _t:     null,
-  CODE_KEY: 'kabu_sync_code',
 
-  /* 設定済みか判定 */
   _configured() {
     const c = window.FIREBASE_CONFIG;
     return c && c.apiKey && c.projectId;
@@ -26,20 +26,76 @@ const Sync = {
     }
     try {
       if (!firebase.apps.length) firebase.initializeApp(window.FIREBASE_CONFIG);
-      this.db = firebase.firestore();
+      this.auth = firebase.auth();
+      this.db   = firebase.firestore();
     } catch (e) {
       console.error(e);
       this.status = 'error';
       return;
     }
-    const saved = localStorage.getItem(this.CODE_KEY);
-    if (saved) this.connect(saved, true);
-    else this.status = 'off';
+
+    // リダイレクト方式ログインの戻り処理
+    this.auth.getRedirectResult().catch(e => console.error(e));
+
+    this.auth.onAuthStateChanged(user => {
+      if (user) {
+        this.user = user;
+        this._startSync();
+      } else {
+        this.user = null;
+        this.status = 'signedout';
+        if (this.unsub) { this.unsub(); this.unsub = null; }
+        this._refreshSettings();
+      }
+    });
   },
 
-  _docRef(code) { return this.db.collection('portfolios').doc(code); },
+  /* ---- ログイン操作 ---- */
+  async loginGoogle() {
+    if (!this.auth) return;
+    const provider = new firebase.auth.GoogleAuthProvider();
+    try {
+      await this.auth.signInWithPopup(provider);
+    } catch (e) {
+      // ポップアップが使えない端末はリダイレクト方式へ
+      if (['auth/popup-blocked','auth/operation-not-supported-in-this-environment','auth/cancelled-popup-request','auth/popup-closed-by-user'].includes(e.code)) {
+        try { await this.auth.signInWithRedirect(provider); return; } catch (e2) { console.error(e2); }
+      }
+      console.error(e);
+      Toast.show('Googleログインに失敗しました: ' + (e.code || e.message), 'error', 5000);
+    }
+  },
 
-  /* 取引の重複排除キー */
+  async signupEmail(email, pw) {
+    try { await this.auth.createUserWithEmailAndPassword(email, pw); Toast.show('アカウントを作成しました', 'success'); }
+    catch (e) { this._authError(e); }
+  },
+
+  async loginEmail(email, pw) {
+    try { await this.auth.signInWithEmailAndPassword(email, pw); }
+    catch (e) { this._authError(e); }
+  },
+
+  async logout() {
+    try { await this.auth.signOut(); Toast.show('ログアウトしました（端末内のデータは残ります）', 'info'); }
+    catch (e) { console.error(e); }
+  },
+
+  _authError(e) {
+    const msg = {
+      'auth/invalid-email':        'メールアドレスの形式が正しくありません',
+      'auth/email-already-in-use': 'このメールアドレスは既に登録済みです。ログインしてください',
+      'auth/weak-password':        'パスワードは6文字以上にしてください',
+      'auth/wrong-password':       'パスワードが違います',
+      'auth/user-not-found':       'アカウントが見つかりません。新規登録してください',
+      'auth/invalid-credential':   'メールアドレスまたはパスワードが違います',
+    }[e.code] || ('エラー: ' + (e.code || e.message));
+    Toast.show(msg, 'error', 5000);
+  },
+
+  /* ---- 同期 ---- */
+  _docRef() { return this.db.collection('portfolios').doc(this.user.uid); },
+
   _key(t) { return t.id || (typeof deduplicateKey === 'function' ? deduplicateKey(t) : JSON.stringify(t)); },
 
   _merge(a, b) {
@@ -51,22 +107,9 @@ const Sync = {
     return [...map.values()];
   },
 
-  async connect(code, silent) {
-    if (!this._configured() || !this.db) {
-      if (!silent) Toast.show('Firebaseが未設定です。設定ページの手順を確認してください', 'error', 5000);
-      this.status = 'unconfigured';
-      this._refreshSettings();
-      return;
-    }
-    code = String(code || '').trim();
-    if (!code) { Toast.show('合言葉を入力してください', 'error'); return; }
-
-    this.code = code;
-    localStorage.setItem(this.CODE_KEY, code);
-    const ref = this._docRef(code);
-
+  async _startSync() {
+    const ref = this._docRef();
     try {
-      // 初回マージ（端末内データ ∪ クラウドデータ）
       const snap   = await ref.get();
       const remote = (snap.exists && snap.data().trades) ? snap.data().trades : [];
       const merged = this._merge(App.trades, remote);
@@ -76,12 +119,10 @@ const Sync = {
     } catch (e) {
       console.error(e);
       this.status = 'error';
-      if (!silent) Toast.show('同期接続に失敗しました', 'error');
       this._refreshSettings();
       return;
     }
 
-    // リアルタイム購読
     if (this.unsub) this.unsub();
     this.unsub = ref.onSnapshot(snap => {
       if (!snap.exists) return;
@@ -89,35 +130,21 @@ const Sync = {
       if (JSON.stringify(remote) !== JSON.stringify(App.trades)) {
         App.trades = remote;
         TradeStorage.saveLocal(remote);
-        App.navigate(App.page);            // 現在ページを再描画
+        App.navigate(App.page);
       }
     }, err => { console.error(err); this.status = 'error'; this._refreshSettings(); });
 
     this.status = 'on';
-    if (!silent) Toast.show('クラウド同期を開始しました', 'success');
-    App.navigate(App.page);                // マージ結果を反映
+    App.navigate(App.page);
     this._refreshSettings();
   },
 
-  /* ローカル変更をクラウドへ送信（600msデバウンス） */
   push() {
-    if (this.status !== 'on' || !this.code || !this.db) return;
+    if (this.status !== 'on' || !this.user || !this.db) return;
     clearTimeout(this._t);
     this._t = setTimeout(() => {
-      this._docRef(this.code)
-        .set({ trades: App.trades, updatedAt: Date.now() })
-        .catch(e => console.error(e));
+      this._docRef().set({ trades: App.trades, updatedAt: Date.now() }).catch(e => console.error(e));
     }, 600);
-  },
-
-  disconnect() {
-    if (this.unsub) this.unsub();
-    this.unsub = null;
-    this.code  = null;
-    this.status = 'off';
-    localStorage.removeItem(this.CODE_KEY);
-    Toast.show('同期を停止しました（端末内のデータは残ります）', 'info');
-    this._refreshSettings();
   },
 
   _refreshSettings() {
