@@ -61,6 +61,7 @@ const Sync = {
     }
 
     const provider = new firebase.auth.GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
 
     // iOS Safari ではリダイレクト方式が完了できない不具合があるため、
     // 全環境でポップアップ方式を優先する（クリック直後なのでブロックされにくい）
@@ -68,7 +69,11 @@ const Sync = {
       await this.auth.signInWithPopup(provider);
     } catch (e) {
       console.error(e);
-      if (e.code === 'auth/operation-not-supported-in-this-environment') {
+      if (e.code === 'auth/popup-blocked') {
+        Toast.show('ポップアップがブロックされました。ブラウザ設定で「ポップアップを許可」してから、もう一度お試しください。', 'error', 7000);
+      } else if (e.code === 'auth/popup-closed-by-user' || e.code === 'auth/cancelled-popup-request') {
+        // ユーザーが閉じた／連打しただけ。何も表示しない
+      } else if (e.code === 'auth/operation-not-supported-in-this-environment') {
         Toast.show('この環境ではGoogleログインを使えません。通常のブラウザ(Safari/Chrome)の https URL で開くか、メール＋パスワードをご利用ください。', 'error', 7000);
       } else if (e.code === 'auth/unauthorized-domain') {
         Toast.show('このドメインが未許可です。Firebaseの「承認済みドメイン」にサイトのドメインを追加してください。', 'error', 7000);
