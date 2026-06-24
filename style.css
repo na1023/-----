@@ -538,9 +538,14 @@ svg{display:block}
    Responsive ≤ 768px
    ============================================================ */
 @media(max-width:768px){
+  /* モバイルは body 全体をスクロールさせる（内側スクロールにすると
+     iOS で position:fixed の下メニューが中央に浮く不具合が起きるため） */
+  #app{display:block;min-height:auto}
+  .main-wrapper{margin-left:0;min-height:auto;padding-bottom:calc(var(--bnav-h) + env(safe-area-inset-bottom,0px) + 8px)}
+  .page-content{overflow:visible}
+
   .sidebar{transform:translateX(-100%);width:min(var(--sidebar-w),85vw)}
   .sidebar.open{transform:translateX(0);box-shadow:var(--shadow-xl)}
-  .main-wrapper{margin-left:0;padding-bottom:var(--bnav-h)}
   .topbar{padding:0 14px}
   .topbar-menu-btn{display:flex}
   .topbar-actions .btn span{display:none}
