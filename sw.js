@@ -1,10 +1,12 @@
-const CACHE = 'kabu-v2';
+const CACHE = 'kabu-v3';
 const ASSETS = [
   './index.html',
   './style.css',
   './js/adapters.js',
   './js/api.js',
   './js/portfolio.js',
+  './js/firebase-config.js',
+  './js/sync.js',
   './js/app.js',
   './icon.svg',
   'https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js',
@@ -26,7 +28,8 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   // API calls → network only (no cache)
-  if (url.hostname.includes('yahoo.com') || url.hostname.includes('corsproxy') || url.hostname.includes('allorigins')) {
+  if (url.hostname.includes('yahoo.com') || url.hostname.includes('corsproxy') || url.hostname.includes('allorigins')
+      || url.hostname.includes('googleapis.com') || url.hostname.includes('firebase') || url.hostname.includes('gstatic.com')) {
     return;
   }
   // Static assets → cache first, fallback network

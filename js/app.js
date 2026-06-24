@@ -13,7 +13,11 @@ const TradeStorage = {
       return (Array.isArray(d) ? d : d.trades ?? []).map(t => ({ id: t.id ?? Utils.uid(), ...t }));
     } catch { return []; }
   },
-  save(trades) { localStorage.setItem(this.KEY, JSON.stringify(trades)); },
+  saveLocal(trades) { localStorage.setItem(this.KEY, JSON.stringify(trades)); },
+  save(trades) {
+    this.saveLocal(trades);
+    if (typeof Sync !== 'undefined') Sync.push();
+  },
   exportJSON(trades) {
     const blob = new Blob([JSON.stringify({ version: 2, exportedAt: new Date().toISOString(), trades }, null, 2)], { type: 'application/json' });
     const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `kabu_backup_${new Date().toISOString().slice(0,10)}.json` });
@@ -124,6 +128,8 @@ const App = {
       const p = location.hash.slice(1);
       if (VALID.includes(p) && p !== this.page) this.navigate(p);
     });
+
+    if (typeof Sync !== 'undefined') Sync.init();
 
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('./sw.js').catch(() => {});
@@ -835,6 +841,7 @@ const App = {
     this.html(`
       <div class="settings-grid">
         <div style="display:flex;flex-direction:column;gap:16px">
+          ${this._syncCard()}
           <div class="card">
             <div class="card-header"><span class="card-title">💾 バックアップ・復元</span></div>
             <div class="card-body" style="display:flex;flex-direction:column;gap:12px">
@@ -871,6 +878,64 @@ const App = {
       r.onload = () => this._importJSON(r.result);
       r.readAsText(f,'utf-8'); e.target.value='';
     });
+  },
+
+  _syncCard() {
+    const S = (typeof Sync !== 'undefined') ? Sync : { status: 'unconfigured', code: null };
+
+    if (S.status === 'unconfigured') {
+      return `<div class="card" style="border-color:#fcd34d">
+        <div class="card-header"><span class="card-title">☁️ クラウド同期（未設定）</span></div>
+        <div class="card-body" style="font-size:.875rem;line-height:1.7">
+          <div class="fetch-banner fetch-banner-warn" style="margin-bottom:12px">
+            Firebaseが未設定のため、データはこの端末内にのみ保存されています。
+          </div>
+          <p style="font-weight:700;margin-bottom:6px">複数端末で同期するための設定手順</p>
+          <ol style="padding-left:1.2em;display:flex;flex-direction:column;gap:5px">
+            <li><a href="https://console.firebase.google.com/" target="_blank" rel="noopener" style="color:var(--c-primary)">Firebaseコンソール</a>で「プロジェクトを作成」（無料・クレカ不要）</li>
+            <li>「Firestore Database」→「データベースを作成」→<b>テストモード</b>で開始</li>
+            <li>プロジェクト設定 → 「マイアプリ」でウェブアプリ（&lt;/&gt;）を追加</li>
+            <li>表示された <code>firebaseConfig</code> の中身を <code>js/firebase-config.js</code> に貼り付けて保存</li>
+            <li>GitHubに再アップロード → アプリを開き直す</li>
+          </ol>
+        </div>
+      </div>`;
+    }
+
+    if (S.status === 'on') {
+      return `<div class="card" style="border-color:#86efac">
+        <div class="card-header"><span class="card-title">☁️ クラウド同期</span>
+          <span class="sync-status sync-on">● 同期中</span></div>
+        <div class="card-body" style="font-size:.875rem">
+          <div class="fetch-banner" style="background:#f0fdf4;border:1.5px solid #86efac;color:#166534;margin-bottom:12px">
+            この合言葉で自動同期しています。<b>別の端末でも同じ合言葉を入力</b>すると、データが共有されます。
+          </div>
+          <div class="pnl-row"><span class="pnl-label">合言葉</span><span class="fw7" style="font-family:monospace;letter-spacing:1px">${this.esc(S.code)}</span></div>
+          <button class="btn btn-ghost" style="margin-top:12px;width:100%" onclick="Sync.disconnect()">同期を停止する</button>
+        </div>
+      </div>`;
+    }
+
+    // status: 'off' or 'error'  → 接続フォーム
+    const errBanner = S.status === 'error'
+      ? `<div class="fetch-banner fetch-banner-warn" style="margin-bottom:12px">接続でエラーが発生しました。合言葉やFirebase設定を確認してください。</div>` : '';
+    return `<div class="card">
+      <div class="card-header"><span class="card-title">☁️ クラウド同期</span>
+        <span class="sync-status sync-off">○ 未接続</span></div>
+      <div class="card-body" style="font-size:.875rem">
+        ${errBanner}
+        <p style="margin-bottom:10px;color:var(--c-text-2)">好きな<b>合言葉</b>を決めて入力してください。<br>他の端末でも<b>同じ合言葉</b>を入れると、データが自動で同期されます。</p>
+        <input class="form-input" id="syncCodeInput" type="text" placeholder="例: kabu-taro-2024" autocapitalize="off" autocomplete="off" style="margin-bottom:10px">
+        <button class="btn btn-primary" style="width:100%" onclick="App._connectSync()">この合言葉で同期を開始</button>
+        <p class="text-xs text-muted" style="margin-top:8px">※ 推測されにくい合言葉にしてください（合言葉を知る人は誰でもデータを見られます）</p>
+      </div>
+    </div>`;
+  },
+
+  _connectSync() {
+    const v = document.getElementById('syncCodeInput')?.value?.trim();
+    if (!v) { Toast.show('合言葉を入力してください', 'error'); return; }
+    Sync.connect(v, false);
   },
 
   _exportData() { TradeStorage.exportJSON(this.trades); Toast.show('バックアップを保存しました','success'); },
