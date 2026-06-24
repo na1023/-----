@@ -262,7 +262,23 @@ const App = {
     const totalEval = Object.keys(this.quotes).length ? holdings.reduce((s,h) => s+(this.quotes[h.symbolCode]?h.shares*this.quotes[h.symbolCode].price:h.totalCost), 0) : null;
     const totalPnl  = totalEval != null ? totalEval - totalCost : null;
 
+    const hasQuotes    = Object.keys(this.quotes).length > 0;
+    const lastFetchTime = Object.values(this.quotes).map(q => q?.updatedAt).find(Boolean) ?? null;
+    const fetchBanner  = this._fetching
+      ? `<div class="fetch-banner fetch-banner-loading">
+           <span class="dot-loading"></span>
+           株価データを取得中です。しばらくお待ちください…
+         </div>`
+      : !hasQuotes
+      ? `<div class="fetch-banner fetch-banner-warn">
+           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+           株価がまだ取得されていません。
+           <button class="btn btn-sm btn-primary" style="margin-left:auto;flex-shrink:0" onclick="App._refreshQuotes()">今すぐ取得</button>
+         </div>`
+      : '';
+
     this.html(`
+      ${fetchBanner}
       <div class="kpi-grid" style="grid-template-columns:repeat(3,1fr)">
         <div class="kpi-card"><div class="kpi-label">保有銘柄数</div><div class="kpi-value">${holdings.length}</div></div>
         <div class="kpi-card"><div class="kpi-label">取得総額</div><div class="kpi-value">${Utils.yen(totalCost)}</div></div>
@@ -275,7 +291,7 @@ const App = {
         <div class="card-header">
           <span class="card-title">保有銘柄一覧</span>
           <div style="display:flex;align-items:center;gap:12px">
-            ${(q => q ? `<span style="font-size:.75rem;color:var(--c-text-3)">最終取得: ${q}</span>` : '')(Object.values(this.quotes).map(q => q?.updatedAt).find(Boolean) ?? '')}
+            ${lastFetchTime ? `<span style="font-size:.75rem;color:var(--c-text-3)">最終取得: ${lastFetchTime}</span>` : ''}
             <button class="btn btn-sm btn-ghost" onclick="App._refreshQuotes()" id="refreshBtn">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
               株価更新
