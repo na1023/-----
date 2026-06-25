@@ -9,6 +9,8 @@ const YahooFinance = (() => {
   const MEM_TTL   = 15 * 60 * 1000;  // 15分
   const DIV_KEY   = 'kabu_div_cache_v1';
   const DIV_TTL   = 24 * 60 * 60 * 1000; // 24時間
+  const SPLIT_KEY = 'kabu_split_cache_v1';
+  const SPLIT_TTL = 7 * 24 * 60 * 60 * 1000; // 7日（分割は頻度が低い）
 
   async function fetchRaw(url) {
     const hit = MEM_CACHE.get(url);
@@ -114,6 +116,54 @@ const YahooFinance = (() => {
     return results;
   }
 
+  /* ===== 株式分割（localStorage 7日キャッシュ） ===== */
+  function loadSplitCache() {
+    try { return JSON.parse(localStorage.getItem(SPLIT_KEY) ?? '{}'); } catch { return {}; }
+  }
+  function saveSplitCache(c) { localStorage.setItem(SPLIT_KEY, JSON.stringify(c)); }
+
+  async function getSplits(code) {
+    const cache = loadSplitCache();
+    if (cache[code] && Date.now() - cache[code].ts < SPLIT_TTL) return cache[code].data;
+
+    const url  = `https://query1.finance.yahoo.com/v8/finance/chart/${code}.T?events=splits&range=15y&interval=1mo`;
+    const data = await fetchRaw(url);
+    const events = data?.chart?.result?.[0]?.events?.splits ?? {};
+    const splits = Object.values(events)
+      .map(s => ({
+        date:   new Date(s.date * 1000).toISOString().slice(0, 10),
+        factor: (s.numerator && s.denominator) ? (s.numerator / s.denominator) : 1,
+      }))
+      .filter(s => s.factor > 0 && s.factor !== 1)
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    cache[code] = { data: splits, ts: Date.now() };
+    saveSplitCache(cache);
+    return splits;
+  }
+
+  function getSplitsCached(code) {
+    const cache = loadSplitCache();
+    return cache[code]?.data ?? null;
+  }
+
+  async function getSplitsMany(codes, onProgress) {
+    const results = {};
+    let i = 0, done = 0;
+    const CONC = 4;
+    async function worker() {
+      while (i < codes.length) {
+        const code = codes[i++];
+        try { results[code] = await getSplits(code); }
+        catch { results[code] = []; }
+        done++;
+        if (onProgress) onProgress(done, codes.length);
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONC, codes.length) }, worker));
+    return results;
+  }
+
   /* キャッシュ強制更新 */
   function clearDivCache(code) {
     const cache = loadDivCache();
@@ -143,5 +193,5 @@ const YahooFinance = (() => {
     } catch { return []; }
   }
 
-  return { getQuote, getQuotes, getDividends, getDividendsCached, getDividendsMany, clearDivCache, clearMemCache, searchSymbol };
+  return { getQuote, getQuotes, getDividends, getDividendsCached, getDividendsMany, getSplits, getSplitsCached, getSplitsMany, clearDivCache, clearMemCache, searchSymbol };
 })();

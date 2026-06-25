@@ -116,6 +116,7 @@ const App = {
   init() {
     this.trades = TradeStorage.load();
     this.quotes = this._loadQuoteCache();   // 前回の株価を即表示
+    this._loadSplits();                     // 株式分割（キャッシュ）を即反映
     Toast.init();
     this._setupSidebar();
     this._setupModal();
@@ -336,6 +337,8 @@ const App = {
         <div class="port-cards" style="padding:14px">${mobileCards}</div>
       </div>`);
 
+    // 分割情報を取得（全取引銘柄。売却済みの実現損益計算にも効く）
+    this._fetchSplits([...new Set(this.trades.map(t => t.symbolCode))]);
     this._fetchQuotes(holdings);
   },
 
@@ -365,6 +368,25 @@ const App = {
   },
   _loadQuoteCache() {
     try { return JSON.parse(localStorage.getItem(this.QUOTE_KEY) ?? '{}') || {}; } catch { return {}; }
+  },
+
+  // 株式分割：キャッシュ済みの分割情報をPortfolioへ反映
+  splitData: {},
+  _loadSplits() {
+    const codes = [...new Set(this.trades.map(t => t.symbolCode).filter(c => Portfolio.isValidCode(c)))];
+    codes.forEach(c => { const s = YahooFinance.getSplitsCached(c); if (s) this.splitData[c] = s; });
+    Portfolio.setSplits(this.splitData);
+  },
+  // 未取得の分割を裏で取得 → 反映して再描画
+  _fetchSplits(codes) {
+    const missing = codes.filter(c => Portfolio.isValidCode(c) && !this.splitData[c]);
+    if (!missing.length) return;
+    YahooFinance.getSplitsMany(missing).then(res => {
+      Object.assign(this.splitData, res);
+      Portfolio.setSplits(this.splitData);
+      if (this.page === 'portfolio') this.renderPortfolio();
+      else if (this.page === 'dividends') this._renderDividendUI(Portfolio.getHoldings(this.trades));
+    }).catch(() => {});
   },
 
   async _refreshQuotes() {
