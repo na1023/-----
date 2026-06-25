@@ -673,12 +673,11 @@ const App = {
       if (hasBom) {
         text = new TextDecoder('utf-8').decode(bytes);
       } else {
-        // Shift_JIS で試す → 文字化け(U+FFFD)が多ければ UTF-8 にフォールバック
-        const sjis = new TextDecoder('shift-jis', { fatal: false }).decode(bytes);
-        const bad  = (sjis.match(/�/g) || []).length;
-        text = bad > 3 ? new TextDecoder('utf-8', { fatal: false }).decode(bytes) : sjis;
+        // UTF-8 strict decode -> 失敗なら Shift_JIS (Shift_JISの日本語バイト列は valid UTF-8 にならない)
+        try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+        catch { text = new TextDecoder('shift-jis', { fatal: false }).decode(bytes); }
       }
-      callback(text.replace(/^﻿/, '')); // BOM文字除去
+      callback(text.replace(/^﻿/, '')); // BOM 除去
     };
     reader.readAsArrayBuffer(file);
   },
@@ -696,23 +695,35 @@ const App = {
   },
 
   _parseCsvHoldings(rawText, filename) {
-    // BOM除去
-    const text = rawText.replace(/^﻿/, '');
+    const text  = rawText;
     const lines = text.split(/\r?\n/);
 
-    // ブローカー自動判定
-    const broker = this._detectBroker(text, filename);
-    Toast.show(`${broker}形式で読み込み中…`, 'info', 2000);
+    // 全パーサーを試しスコアで最良を選ぶ
+    const candidates = [
+      { key: 'SBI',        fn: () => this._parseSBI(lines)      },
+      { key: '楽天',       fn: () => this._parseRakuten(lines)   },
+      { key: '松井',       fn: () => this._parseMatsui(lines)    },
+      { key: 'マネックス', fn: () => this._parseMonex(lines)     },
+      { key: '汎用',       fn: () => this._parseGeneric(lines)   },
+    ];
+    const tried = candidates.map(c => {
+      try { return { key: c.key, rows: c.fn() }; } catch { return { key: c.key, rows: [] }; }
+    });
+    // スコア: 総行数 + avgCost>0 ボーナス + 名前≠コード ボーナス
+    const score = r =>
+      r.rows.length * 10
+      + r.rows.filter(h => h.avgCost > 0).length * 5
+      + r.rows.filter(h => h.name && h.name !== h.code).length * 3;
+    tried.sort((a, b) => score(b) - score(a));
 
-    let parsed = [];
-    if      (broker === 'SBI')     parsed = this._parseSBI(lines);
-    else if (broker === '楽天')    parsed = this._parseRakuten(lines);
-    else if (broker === '松井')    parsed = this._parseMatsui(lines);
-    else if (broker === 'マネックス') parsed = this._parseMonex(lines);
-    else                           parsed = this._parseGeneric(lines);
+    const best   = tried[0];
+    const parsed = best.rows;
+    // detected broker をヒントに使い、最良パーサーが汎用なら検出値を優先
+    const detected = this._detectBroker(text, filename);
+    const broker   = score(best) > 0 ? best.key : detected;
 
     if (!parsed.length) {
-      Toast.show('有効な銘柄が見つかりませんでした。対応: SBI・楽天・松井・マネックス保有一覧CSV', 'error', 6000);
+      Toast.show('有効な銘柄が見つかりませんでした。SBI・楽天・松井・マネックスの保有一覧CSVに対応', 'error', 6000);
       return;
     }
 
