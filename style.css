@@ -312,6 +312,48 @@ tbody tr:hover td { background: #f8fafc; }
 .empty-state h3 { font-size: 1.125rem; font-weight: 600; margin-bottom: 8px; color: var(--text); }
 .empty-state p { font-size: .9375rem; margin-bottom: 20px; }
 
+/* ===== Broker filter bar ===== */
+.broker-filter-bar {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.broker-tab {
+  display: flex; align-items: center; gap: 5px;
+  padding: 6px 14px; border-radius: 99px;
+  border: 1.5px solid var(--border);
+  background: var(--surface);
+  font-size: .8125rem; font-weight: 500;
+  color: var(--text-2); cursor: pointer;
+  transition: all .15s; white-space: nowrap;
+}
+.broker-tab:hover { border-color: var(--primary); color: var(--primary); }
+.broker-tab.active { border-color: var(--primary); background: var(--primary); color: white; font-weight: 600; }
+.broker-tab.active .broker-dot { background: white; }
+
+/* 証券会社カラードット */
+.broker-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
+.broker-dot-sbi      { background: #f97316; }
+.broker-dot-rakuten  { background: #dc2626; }
+.broker-dot-matsui   { background: #2563eb; }
+.broker-dot-monex    { background: #7c3aed; }
+.broker-dot-other    { background: #94a3b8; }
+
+/* 証券会社グループヘッダー */
+.broker-group-hdr {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 0 10px; margin-bottom: 8px;
+  border-bottom: 2px solid var(--border);
+}
+.broker-group-name {
+  font-size: .9375rem; font-weight: 700; color: var(--text);
+}
+.broker-group-stats {
+  margin-left: auto; font-size: .875rem; font-weight: 600;
+  display: flex; align-items: center; gap: 4px;
+}
+
 /* ===== Misc ===== */
 .spinner { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin .7s linear infinite; display: inline-block; }
 .section-title { font-size: 1rem; font-weight: 700; margin-bottom: 12px; }

@@ -53,6 +53,7 @@ const App = {
   divYear: new Date().getFullYear(),
   taxAfter: false,
   holdFilter: 'all',
+  brokerFilter: 'all',
   _charts: {},
   _editId: null,
   _acTimer: null,
@@ -294,66 +295,103 @@ const App = {
   },
 
   /* ===== Holdings ===== */
+  _BROKERS: ['SBI証券', '楽天証券', '松井証券', 'マネックス証券', 'その他'],
+
   renderHoldings() {
-    const enriched = Portfolio.calcAll(this.holdings, this.quotes);
-    const filters  = { all: '全て', 特定: '特定', NISA: 'NISA', 一般: '一般' };
-    const filtered = this.holdFilter === 'all' ? enriched : enriched.filter(h => h.account === this.holdFilter);
+    const enriched  = Portfolio.calcAll(this.holdings, this.quotes);
+    const brokers   = ['all', ...this._BROKERS.filter(b => enriched.some(h => (h.broker||'その他') === b))];
+    const byBroker  = this.brokerFilter === 'all' ? enriched : enriched.filter(h => (h.broker||'その他') === this.brokerFilter);
+    const filtered  = this.holdFilter === 'all' ? byBroker : byBroker.filter(h => h.account === this.holdFilter);
+
+    // グループ: brokerFilter=allのとき証券会社ごとに分割表示
+    const groups = this.brokerFilter === 'all'
+      ? this._BROKERS.filter(b => enriched.some(h => (h.broker||'その他') === b))
+          .map(b => ({ broker: b, items: filtered.filter(h => (h.broker||'その他') === b) }))
+          .filter(g => g.items.length)
+      : [{ broker: this.brokerFilter, items: filtered }];
 
     const el = document.getElementById('page-area');
     el.innerHTML = `
       <div class="page-hdr">
-        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-          <h2>保有銘柄 (${this.holdings.length}件)</h2>
-          <div class="filter-tabs">
-            ${Object.entries(filters).map(([k, v]) =>
-              `<button class="filter-tab ${this.holdFilter === k ? 'active' : ''}" onclick="App.setHoldFilter('${k}')">${v}</button>`
-            ).join('')}
-          </div>
-        </div>
-        <div style="display:flex;gap:8px;align-items:center">
-          <button class="btn-ghost" onclick="App.triggerCsvImport()" style="display:flex;align-items:center;gap:6px;font-size:.8125rem;padding:7px 14px">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <h2>保有銘柄 <span style="font-size:.875rem;font-weight:500;color:var(--text-2)">${this.holdings.length}件</span></h2>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn-ghost" onclick="App.triggerCsvImport()" style="display:flex;align-items:center;gap:5px;font-size:.8125rem;padding:7px 12px">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             CSV取込
           </button>
           <button class="btn-primary-sm" onclick="App.openModal()">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-            銘柄追加
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="13" height="13"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            追加
           </button>
         </div>
+      </div>
+
+      <!-- 証券会社フィルタ -->
+      <div class="broker-filter-bar">
+        ${brokers.map(b => `
+          <button class="broker-tab ${this.brokerFilter===b?'active':''}" onclick="App.setBrokerFilter('${b}')">
+            ${b === 'all' ? '全て' : `<span class="broker-dot broker-dot-${this._brokerKey(b)}"></span>${b}`}
+          </button>`).join('')}
+      </div>
+
+      <!-- 口座フィルタ -->
+      <div class="filter-tabs" style="margin-bottom:16px">
+        ${['all','特定','NISA','一般'].map(k =>
+          `<button class="filter-tab ${this.holdFilter===k?'active':''}" onclick="App.setHoldFilter('${k}')">${k==='all'?'全口座':k}</button>`
+        ).join('')}
       </div>
 
       ${!filtered.length ? `<div class="empty-state">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/></svg>
         <h3>銘柄がありません</h3><p>「+ 追加」から登録してください</p>
         <button class="btn-primary-lg" onclick="App.openModal()">銘柄を追加する</button>
-      </div>` : ''}
+      </div>` : groups.map(g => this._renderBrokerGroup(g)).join('')}
+    `;
+  },
 
-      <!-- PC Table -->
-      ${filtered.length ? `
-      <div class="table-wrap">
-        <table>
-          <thead><tr>
-            <th>銘柄</th>
-            <th class="num">株数</th>
-            <th class="num">取得単価</th>
-            <th class="num">現在値</th>
-            <th class="num">評価額</th>
-            <th class="num">評価損益</th>
-            <th class="num">前日比</th>
-            <th>口座</th>
-            <th></th>
-          </tr></thead>
-          <tbody>
-            ${filtered.map(h => `
-              <tr>
+  _brokerKey(b) {
+    return { 'SBI証券':'sbi','楽天証券':'rakuten','松井証券':'matsui','マネックス証券':'monex','その他':'other' }[b] ?? 'other';
+  },
+
+  _renderBrokerGroup(g) {
+    const totalVal  = g.items.reduce((s,h) => s+h.value, 0);
+    const totalPnl  = g.items.reduce((s,h) => s+h.pnl, 0);
+    const totalDay  = g.items.reduce((s,h) => s+h.dayChg, 0);
+    return `
+      <div class="broker-group" style="margin-bottom:24px">
+        <div class="broker-group-hdr">
+          <span class="broker-dot broker-dot-${this._brokerKey(g.broker)}"></span>
+          <span class="broker-group-name">${g.broker}</span>
+          <span class="broker-group-stats">
+            <span>${yen(totalVal)}</span>
+            <span class="${sc(totalPnl)}" style="margin-left:8px">${sg(totalPnl)}${yen(totalPnl)} (${sg(totalPnl)}${pct(totalVal>0?(totalPnl/(totalVal-totalPnl)*100):0)})</span>
+          </span>
+        </div>
+
+        <!-- PC Table -->
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>銘柄</th>
+              <th class="num">株数</th>
+              <th class="num">取得単価</th>
+              <th class="num">現在値</th>
+              <th class="num">評価額</th>
+              <th class="num">評価損益</th>
+              <th class="num">前日比</th>
+              <th>口座</th>
+              <th></th>
+            </tr></thead>
+            <tbody>
+              ${g.items.map(h => `<tr>
                 <td>
                   <div style="font-size:.75rem;color:var(--text-3)">${h.code}</div>
                   <div style="font-weight:600">${h.name}</div>
                   ${h.memo ? `<div style="font-size:.75rem;color:var(--text-3)">${h.memo}</div>` : ''}
                 </td>
                 <td class="num">${num(h.shares)}</td>
-                <td class="num">${yen(h.avgCost, 1)}</td>
-                <td class="num">${h.price !== h.avgCost ? yen(h.price, 1) : '<span style="color:var(--text-3)">未取得</span>'}</td>
+                <td class="num">${yen(h.avgCost,1)}</td>
+                <td class="num">${h.price!==h.avgCost ? yen(h.price,1) : '<span style="color:var(--text-3)">未取得</span>'}</td>
                 <td class="num">${yen(h.value)}</td>
                 <td class="num">
                   <span class="${sc(h.pnl)}" style="font-weight:700">${sg(h.pnl)}${yen(h.pnl)}</span>
@@ -369,60 +407,61 @@ const App = {
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                   </button>
                   <button class="action-btn del" onclick="App.deleteHolding('${h.id}')" title="削除">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
                   </button>
                 </td>
               </tr>`).join('')}
-          </tbody>
-          <tfoot><tr class="tfoot-row">
-            <td colspan="4">合計</td>
-            <td class="num">${yen(filtered.reduce((s,h) => s+h.value, 0))}</td>
-            <td class="num"><span class="${sc(filtered.reduce((s,h)=>s+h.pnl,0))}">${sg(filtered.reduce((s,h)=>s+h.pnl,0))}${yen(filtered.reduce((s,h)=>s+h.pnl,0))}</span></td>
-            <td class="num"><span class="${sc(filtered.reduce((s,h)=>s+h.dayChg,0))}">${sg(filtered.reduce((s,h)=>s+h.dayChg,0))}${yen(filtered.reduce((s,h)=>s+h.dayChg,0))}</span></td>
-            <td colspan="2"></td>
-          </tr></tfoot>
-        </table>
-      </div>
+            </tbody>
+            <tfoot><tr class="tfoot-row">
+              <td colspan="4">${g.broker} 合計</td>
+              <td class="num">${yen(totalVal)}</td>
+              <td class="num"><span class="${sc(totalPnl)}">${sg(totalPnl)}${yen(totalPnl)}</span></td>
+              <td class="num"><span class="${sc(totalDay)}">${sg(totalDay)}${yen(totalDay)}</span></td>
+              <td colspan="2"></td>
+            </tr></tfoot>
+          </table>
+        </div>
 
-      <!-- Mobile Cards -->
-      <div class="holdings-cards">
-        ${filtered.map(h => `
-          <div class="holding-card">
-            <div class="hc-top">
-              <div class="hc-info">
-                <div class="hc-code">${h.code} <span class="account-badge ${h.account}">${h.account}</span></div>
-                <div class="hc-name">${h.name}</div>
-                ${h.memo ? `<div style="font-size:.75rem;color:var(--text-3);margin-top:2px">${h.memo}</div>` : ''}
+        <!-- Mobile Cards -->
+        <div class="holdings-cards">
+          ${g.items.map(h => `
+            <div class="holding-card">
+              <div class="hc-top">
+                <div class="hc-info">
+                  <div class="hc-code">${h.code} <span class="account-badge ${h.account}">${h.account}</span></div>
+                  <div class="hc-name">${h.name}</div>
+                  ${h.memo ? `<div style="font-size:.75rem;color:var(--text-3);margin-top:2px">${h.memo}</div>` : ''}
+                </div>
+                <div class="hc-pnl">
+                  <div class="hc-pnl-val ${sc(h.pnl)}">${sg(h.pnl)}${yen(h.pnl)}</div>
+                  <div class="hc-pnl-pct ${sc(h.pnlPct)}">${sg(h.pnlPct)}${pct(h.pnlPct)}</div>
+                </div>
               </div>
-              <div class="hc-pnl">
-                <div class="hc-pnl-val ${sc(h.pnl)}">${sg(h.pnl)}${yen(h.pnl)}</div>
-                <div class="hc-pnl-pct ${sc(h.pnlPct)}">${sg(h.pnlPct)}${pct(h.pnlPct)}</div>
+              <div class="hc-grid">
+                <div class="hc-stat"><div class="hc-label">株数</div><div class="hc-value">${num(h.shares)}</div></div>
+                <div class="hc-stat"><div class="hc-label">取得単価</div><div class="hc-value">${yen(h.avgCost,1)}</div></div>
+                <div class="hc-stat"><div class="hc-label">現在値</div><div class="hc-value ${h.price!==h.avgCost?'':'neutral'}">${h.price!==h.avgCost?yen(h.price,1):'未取得'}</div></div>
+                <div class="hc-stat"><div class="hc-label">評価額</div><div class="hc-value">${yen(h.value)}</div></div>
+                <div class="hc-stat"><div class="hc-label">前日比</div><div class="hc-value ${sc(h.dayChg)}">${sg(h.dayChg)}${yen(h.dayChg)}</div></div>
+                <div class="hc-stat"><div class="hc-label">前日比率</div><div class="hc-value ${sc(h.dayChgPct)}">${sg(h.dayChgPct)}${pct(h.dayChgPct)}</div></div>
               </div>
-            </div>
-            <div class="hc-grid">
-              <div class="hc-stat"><div class="hc-label">株数</div><div class="hc-value">${num(h.shares)}</div></div>
-              <div class="hc-stat"><div class="hc-label">取得単価</div><div class="hc-value">${yen(h.avgCost,1)}</div></div>
-              <div class="hc-stat"><div class="hc-label">現在値</div><div class="hc-value ${h.price!==h.avgCost ? '' : 'neutral'}">${h.price!==h.avgCost ? yen(h.price,1) : '未取得'}</div></div>
-              <div class="hc-stat"><div class="hc-label">評価額</div><div class="hc-value">${yen(h.value)}</div></div>
-              <div class="hc-stat"><div class="hc-label">前日比</div><div class="hc-value ${sc(h.dayChg)}">${sg(h.dayChg)}${yen(h.dayChg)}</div></div>
-              <div class="hc-stat"><div class="hc-label">前日比率</div><div class="hc-value ${sc(h.dayChgPct)}">${sg(h.dayChgPct)}${pct(h.dayChgPct)}</div></div>
-            </div>
-            <div class="hc-actions">
-              <button class="action-btn" onclick="App.openModal('${h.id}')">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-                編集
-              </button>
-              <button class="action-btn del" onclick="App.deleteHolding('${h.id}')">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
-                削除
-              </button>
-            </div>
-          </div>`).join('')}
-      </div>` : ''}
-    `;
+              <div class="hc-actions">
+                <button class="action-btn" onclick="App.openModal('${h.id}')">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                  編集
+                </button>
+                <button class="action-btn del" onclick="App.deleteHolding('${h.id}')">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+                  削除
+                </button>
+              </div>
+            </div>`).join('')}
+        </div>
+      </div>`;
   },
 
-  setHoldFilter(f) { this.holdFilter = f; this.renderHoldings(); },
+  setHoldFilter(f)   { this.holdFilter = f;   this.renderHoldings(); },
+  setBrokerFilter(b) { this.brokerFilter = b;  this.renderHoldings(); },
 
   /* ===== CSV Import ===== */
   triggerCsvImport() {
@@ -471,16 +510,20 @@ const App = {
       this.holdings = [];
     }
 
+    // ブローカー名マッピング
+    const brokerName = { 'SBI':'SBI証券', '楽天':'楽天証券', '松井':'松井証券', 'マネックス':'マネックス証券', '汎用':'その他' }[broker] ?? 'その他';
+
     let added = 0;
     parsed.forEach(h => {
-      const exists = this.holdings.find(x => x.code === h.code && x.account === h.account);
+      const exists = this.holdings.find(x => x.code === h.code && x.account === h.account && (x.broker||'その他') === brokerName);
       if (exists) {
         exists.shares    = h.shares;
         exists.avgCost   = h.avgCost;
         exists.name      = h.name || exists.name;
+        exists.broker    = brokerName;
         exists.updatedAt = Date.now();
       } else {
-        this.holdings.push({ id: uid(), ...h, memo: '', addedAt: Date.now(), updatedAt: Date.now() });
+        this.holdings.push({ id: uid(), ...h, broker: brokerName, memo: '', addedAt: Date.now(), updatedAt: Date.now() });
         added++;
       }
     });
@@ -937,6 +980,7 @@ const App = {
         document.getElementById('m-id').value       = h.id;
         document.getElementById('m-account').value  = h.account;
         document.querySelectorAll('#holding-modal .tab-btn').forEach(b => b.classList.toggle('active', b.dataset.val === h.account));
+        if (document.getElementById('m-broker')) document.getElementById('m-broker').value = h.broker || 'その他';
       }
     }
 
@@ -962,14 +1006,16 @@ const App = {
     if (!shares || shares <= 0) { Toast.show('株数を正しく入力してください', 'error'); return; }
     if (!avgCost || avgCost < 0) { Toast.show('取得単価を入力してください', 'error'); return; }
 
+    const broker = document.getElementById('m-broker')?.value || 'その他';
+
     if (existId) {
       const idx = this.holdings.findIndex(h => h.id === existId);
       if (idx >= 0) {
-        this.holdings[idx] = { ...this.holdings[idx], code, name, shares, avgCost, account, memo, updatedAt: Date.now() };
+        this.holdings[idx] = { ...this.holdings[idx], code, name, shares, avgCost, account, broker, memo, updatedAt: Date.now() };
         Toast.show('更新しました', 'success');
       }
     } else {
-      this.holdings.push({ id: uid(), code, name, shares, avgCost, account, memo, addedAt: Date.now(), updatedAt: Date.now() });
+      this.holdings.push({ id: uid(), code, name, shares, avgCost, account, broker, memo, addedAt: Date.now(), updatedAt: Date.now() });
       Toast.show('追加しました', 'success');
       // Fetch quote & dividends for new holding
       if (code) {
