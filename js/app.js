@@ -464,9 +464,12 @@ const App = {
         return { h, annDiv, yldCost, yldNow, yld };
       });
 
-    // 年リスト
-    const years = [...new Set(allRecs.map(r => r.year))].sort().reverse();
-    if (!years.includes(String(year))) years.unshift(String(year));
+    // 年リスト：直近6年＋実際に記録のある年を常に選べるように
+    const nowY = new Date().getFullYear();
+    const yearSet = new Set(allRecs.map(r => r.year));
+    for (let y = nowY; y >= nowY - 5; y--) yearSet.add(String(y));
+    yearSet.add(String(year));
+    const years = [...yearSet].sort().reverse();
     const yearOpts = years.map(y => `<option value="${y}" ${y==year?'selected':''}>${y}年</option>`).join('');
 
     // 表行
@@ -817,7 +820,8 @@ const App = {
               <div style="flex:1;min-width:140px"><label class="form-label" style="margin-bottom:5px;display:block">取込モード</label>
                 <select class="form-select" id="importMode">
                   <option value="append">追加（重複はスキップ）</option>
-                  <option value="replace">上書き（既存を全削除して入替）</option>
+                  <option value="replace-source">この証券会社のデータだけ入替（推奨）</option>
+                  <option value="replace">全データを上書き（全削除して入替）</option>
                 </select></div>
             </div>
             <div class="dropzone" id="dz">
@@ -922,20 +926,8 @@ const App = {
         const holdings = this._parseSBIHoldings(text);
         if (holdings) {
           add(`📊 SBI 保有証券一覧CSV と判定 / ${holdings.length} 銘柄`);
-          const mode = document.getElementById('importMode')?.value ?? 'append';
-          if (mode === 'replace') {
-            if (!confirm(`「上書き」モードです。\n既存の ${this.trades.length} 件を全削除し、保有CSVの ${holdings.length} 銘柄に入れ替えます。\nよろしいですか？`)) { add('⏹ 上書きをキャンセルしました'); return; }
-            this.trades = holdings;
-          } else {
-            const exist = new Set(this.trades.map(deduplicateKey));
-            const fresh = holdings.filter(r => !exist.has(deduplicateKey(r)));
-            this.trades = this.trades.concat(fresh);
-            add(`<span class="text-muted">追加 ${fresh.length} 件 / 重複スキップ ${holdings.length - fresh.length} 件</span>`);
-          }
-          TradeStorage.save(this.trades);
-          add(`✅ 保有 ${holdings.length} 銘柄を取込みました`, 'log-ok');
-          add('<span class="text-muted">※保有CSVは日付が無いため、本日付の「買い」として登録しています（過去の売買・配当履歴は含まれません）。</span>');
-          Toast.show(`SBI保有: ${holdings.length} 銘柄を取込`, 'success');
+          this._applyImport(holdings, 'sbi-holdings', 'SBI保有', add);
+          add('<span class="text-muted">※保有CSVは日付が無いため、本日付の「買い」として登録（過去の売買・配当履歴は含まれません）。</span>');
           return;
         }
 
@@ -960,26 +952,37 @@ const App = {
           console.log('CSV fields:', fields, 'sample row:', parsed.data[0]);
           return;
         }
-        const mode = document.getElementById('importMode')?.value ?? 'append';
-        if (mode === 'replace') {
-          if (!confirm(`「上書き」モードです。\n既存の ${this.trades.length} 件をすべて削除し、このCSVの ${recs.length} 件に入れ替えます。\nよろしいですか？`)) {
-            add('⏹ 上書きをキャンセルしました'); return;
-          }
-          this.trades = recs;
-          TradeStorage.save(this.trades);
-          add(`✅ ${recs.length} 件で上書きしました`, 'log-ok');
-          Toast.show(`${broker}: ${recs.length} 件で上書き`, 'success');
-        } else {
-          const exist = new Set(this.trades.map(deduplicateKey));
-          const fresh = recs.filter(r => !exist.has(deduplicateKey(r)));
-          this.trades = this.trades.concat(fresh);
-          TradeStorage.save(this.trades);
-          add(`✅ ${fresh.length} 件追加（重複スキップ: ${recs.length-fresh.length} 件）`, 'log-ok');
-          Toast.show(`${broker}: ${fresh.length} 件追加`, 'success');
-        }
+        this._applyImport(recs, broker.toLowerCase(), broker, add);
       };
       reader.readAsArrayBuffer(file);
     });
+  },
+
+  // 取込の適用：モード別（追加 / この証券だけ置換 / 全置換）
+  _applyImport(recs, sourceTag, label, add) {
+    recs.forEach(r => { r.source = sourceTag; });
+    const mode = document.getElementById('importMode')?.value ?? 'append';
+
+    if (mode === 'replace') {
+      if (!confirm(`【全置換】既存の ${this.trades.length} 件をすべて削除し、今回の ${recs.length} 件に入れ替えます。よろしいですか？`)) { add('⏹ キャンセルしました'); return; }
+      this.trades = recs;
+      add(`✅ 全データを ${recs.length} 件で置き換えました`, 'log-ok');
+      Toast.show(`${label}: ${recs.length} 件で全置換`, 'success');
+
+    } else if (mode === 'replace-source') {
+      const removed = this.trades.filter(t => t.source === sourceTag).length;
+      this.trades = this.trades.filter(t => t.source !== sourceTag).concat(recs);
+      add(`✅ 「${label}」のデータを入替（旧 ${removed} 件 → 新 ${recs.length} 件）。他の証券会社のデータは保持`, 'log-ok');
+      Toast.show(`${label}: ${recs.length} 件で入替`, 'success');
+
+    } else {
+      const exist = new Set(this.trades.map(deduplicateKey));
+      const fresh = recs.filter(r => !exist.has(deduplicateKey(r)));
+      this.trades = this.trades.concat(fresh);
+      add(`✅ ${fresh.length} 件追加（重複スキップ: ${recs.length - fresh.length} 件）`, 'log-ok');
+      Toast.show(`${label}: ${fresh.length} 件追加`, 'success');
+    }
+    TradeStorage.save(this.trades);
   },
 
   /* ============================================================
