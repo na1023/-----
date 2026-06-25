@@ -313,23 +313,23 @@ const App = {
   _BROKERS: ['SBI証券', '楽天証券', '松井証券', 'マネックス証券', 'その他'],
 
   renderHoldings() {
-    const enriched  = Portfolio.calcAll(this.holdings, this.quotes);
-    const brokers   = ['all', ...this._BROKERS.filter(b => enriched.some(h => (h.broker||'その他') === b))];
-    const byBroker  = this.brokerFilter === 'all' ? enriched : enriched.filter(h => (h.broker||'その他') === this.brokerFilter);
-    const filtered  = this.holdFilter === 'all' ? byBroker : byBroker.filter(h => h.account === this.holdFilter);
-
-    // グループ: brokerFilter=allのとき証券会社ごとに分割表示
-    const groups = this.brokerFilter === 'all'
-      ? this._BROKERS.filter(b => enriched.some(h => (h.broker||'その他') === b))
-          .map(b => ({ broker: b, items: filtered.filter(h => (h.broker||'その他') === b) }))
-          .filter(g => g.items.length)
-      : [{ broker: this.brokerFilter, items: filtered }];
-
+    const enriched = Portfolio.calcAll(this.holdings, this.quotes);
     const el = document.getElementById('page-area');
-    el.innerHTML = `
+
+    const hdr = `
       <div class="page-hdr">
         <h2>保有銘柄 <span style="font-size:.875rem;font-weight:500;color:var(--text-2)">${this.holdings.length}件</span></h2>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <div class="view-toggle">
+            <button class="view-tab ${this.holdView==='broker' ?'active':''}" onclick="App.setHoldView('broker')">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+              証券会社別
+            </button>
+            <button class="view-tab ${this.holdView==='merged'?'active':''}" onclick="App.setHoldView('merged')">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+              銘柄別合算
+            </button>
+          </div>
           <button class="btn-ghost" onclick="App.triggerCsvImport()" style="display:flex;align-items:center;gap:5px;font-size:.8125rem;padding:7px 12px">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             CSV取込
@@ -339,8 +339,24 @@ const App = {
             追加
           </button>
         </div>
-      </div>
+      </div>`;
 
+    if (this.holdView === 'merged') {
+      el.innerHTML = hdr + this._renderMergedView(enriched);
+      return;
+    }
+
+    // ===== 証券会社別ビュー =====
+    const brokers  = ['all', ...this._BROKERS.filter(b => enriched.some(h => (h.broker||'その他') === b))];
+    const byBroker = this.brokerFilter === 'all' ? enriched : enriched.filter(h => (h.broker||'その他') === this.brokerFilter);
+    const filtered = this.holdFilter === 'all' ? byBroker : byBroker.filter(h => h.account === this.holdFilter);
+    const groups   = this.brokerFilter === 'all'
+      ? this._BROKERS.filter(b => enriched.some(h => (h.broker||'その他') === b))
+          .map(b => ({ broker: b, items: filtered.filter(h => (h.broker||'その他') === b) }))
+          .filter(g => g.items.length)
+      : [{ broker: this.brokerFilter, items: filtered }];
+
+    el.innerHTML = hdr + `
       <!-- 証券会社フィルタ -->
       <div class="broker-filter-bar">
         ${brokers.map(b => `
@@ -348,14 +364,12 @@ const App = {
             ${b === 'all' ? '全て' : `<span class="broker-dot broker-dot-${this._brokerKey(b)}"></span>${b}`}
           </button>`).join('')}
       </div>
-
       <!-- 口座フィルタ -->
       <div class="filter-tabs" style="margin-bottom:16px">
         ${['all','特定','NISA','一般'].map(k =>
           `<button class="filter-tab ${this.holdFilter===k?'active':''}" onclick="App.setHoldFilter('${k}')">${k==='all'?'全口座':k}</button>`
         ).join('')}
       </div>
-
       ${!filtered.length ? `<div class="empty-state">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/></svg>
         <h3>銘柄がありません</h3><p>「+ 追加」から登録してください</p>
@@ -363,6 +377,175 @@ const App = {
       </div>` : groups.map(g => this._renderBrokerGroup(g)).join('')}
     `;
   },
+
+  /* ===== 銘柄別合算ビュー ===== */
+  _renderMergedView(enriched) {
+    if (!enriched.length) return `<div class="empty-state">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/></svg>
+      <h3>銘柄がありません</h3><button class="btn-primary-lg" onclick="App.openModal()">銘柄を追加する</button>
+    </div>`;
+
+    // コード別に集計
+    const codeMap = new Map();
+    enriched.forEach(h => {
+      if (!codeMap.has(h.code)) codeMap.set(h.code, []);
+      codeMap.get(h.code).push(h);
+    });
+
+    // 各コードの合算データを計算
+    const merged = [...codeMap.entries()].map(([code, items]) => {
+      const totalShares = items.reduce((s, h) => s + h.shares, 0);
+      const totalCost   = items.reduce((s, h) => s + h.cost,   0);
+      const totalValue  = items.reduce((s, h) => s + h.value,  0);
+      const totalPnl    = totalValue - totalCost;
+      const pnlPct      = totalCost > 0 ? totalPnl / totalCost * 100 : 0;
+      const totalDay    = items.reduce((s, h) => s + h.dayChg, 0);
+      const dayChgPct   = items[0].dayChgPct; // 株価は同一なので代表値
+      const price       = items[0].price;
+      const avgCost     = totalCost / totalShares;
+      const name        = items[0].name;
+      return { code, name, totalShares, totalCost, totalValue, totalPnl, pnlPct, totalDay, dayChgPct, price, avgCost, items };
+    }).sort((a, b) => b.totalValue - a.totalValue);
+
+    const grandVal = merged.reduce((s, m) => s + m.totalValue, 0);
+    const grandPnl = merged.reduce((s, m) => s + m.totalPnl,  0);
+    const grandDay = merged.reduce((s, m) => s + m.totalDay,  0);
+
+    return `
+      <div class="merged-note">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        同一銘柄の全証券会社・口座を合算表示。▼で内訳を確認できます。
+      </div>
+
+      <!-- PC Table -->
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>銘柄</th>
+            <th class="num">合計株数</th>
+            <th class="num">加重平均単価</th>
+            <th class="num">現在値</th>
+            <th class="num">合計評価額</th>
+            <th class="num">合計損益</th>
+            <th class="num">前日比</th>
+            <th style="width:36px"></th>
+          </tr></thead>
+          <tbody>
+            ${merged.map(m => `
+              <tr class="merged-row" onclick="App._toggleMergedDetail('${m.code}')" style="cursor:pointer">
+                <td>
+                  <div style="font-size:.75rem;color:var(--text-3)">${m.code}</div>
+                  <div style="font-weight:600">${m.name}</div>
+                  <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:2px">
+                    ${m.items.map(h => `<span class="mini-badge broker-bg-${this._brokerKey(h.broker||'その他')}">${h.broker||'その他'} ${h.account} ${num(h.shares)}株</span>`).join('')}
+                  </div>
+                </td>
+                <td class="num">${num(m.totalShares)}</td>
+                <td class="num">${yen(m.avgCost, 1)}</td>
+                <td class="num">${m.price !== m.avgCost ? yen(m.price, 1) : '<span style="color:var(--text-3)">未取得</span>'}</td>
+                <td class="num">${yen(m.totalValue)}</td>
+                <td class="num">
+                  <span class="${sc(m.totalPnl)}" style="font-weight:700">${sg(m.totalPnl)}${yen(m.totalPnl)}</span>
+                  <div class="${sc(m.pnlPct)}" style="font-size:.75rem">${sg(m.pnlPct)}${pct(m.pnlPct)}</div>
+                </td>
+                <td class="num">
+                  <span class="${sc(m.totalDay)}">${sg(m.totalDay)}${yen(m.totalDay)}</span>
+                  <div class="${sc(m.dayChgPct)}" style="font-size:.75rem">${sg(m.dayChgPct)}${pct(m.dayChgPct)}</div>
+                </td>
+                <td style="text-align:center">
+                  ${m.items.length > 1 ? `<span class="expand-icon" id="expand-${m.code}">▼</span>` : ''}
+                </td>
+              </tr>
+              ${m.items.length > 1 ? `
+              <tr class="merged-detail" id="detail-${m.code}" style="display:none">
+                <td colspan="8" style="padding:0">
+                  <table class="inner-table">
+                    <thead><tr>
+                      <th>証券会社</th><th>口座</th>
+                      <th class="num">株数</th><th class="num">取得単価</th>
+                      <th class="num">評価額</th><th class="num">評価損益</th>
+                      <th></th>
+                    </tr></thead>
+                    <tbody>
+                      ${m.items.map(h => `<tr>
+                        <td><span class="broker-dot broker-dot-${this._brokerKey(h.broker||'その他')}" style="margin-right:4px"></span>${h.broker||'その他'}</td>
+                        <td><span class="account-badge ${h.account}">${h.account}</span></td>
+                        <td class="num">${num(h.shares)}</td>
+                        <td class="num">${yen(h.avgCost,1)}</td>
+                        <td class="num">${yen(h.value)}</td>
+                        <td class="num"><span class="${sc(h.pnl)}">${sg(h.pnl)}${yen(h.pnl)}</span></td>
+                        <td>
+                          <button class="action-btn" onclick="event.stopPropagation();App.openModal('${h.id}')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                          </button>
+                        </td>
+                      </tr>`).join('')}
+                    </tbody>
+                  </table>
+                </td>
+              </tr>` : ''}
+            `).join('')}
+          </tbody>
+          <tfoot><tr class="tfoot-row">
+            <td colspan="4">合計</td>
+            <td class="num">${yen(grandVal)}</td>
+            <td class="num"><span class="${sc(grandPnl)}">${sg(grandPnl)}${yen(grandPnl)}</span></td>
+            <td class="num"><span class="${sc(grandDay)}">${sg(grandDay)}${yen(grandDay)}</span></td>
+            <td></td>
+          </tr></tfoot>
+        </table>
+      </div>
+
+      <!-- Mobile Cards (合算) -->
+      <div class="holdings-cards">
+        ${merged.map(m => `
+          <div class="holding-card">
+            <div class="hc-top">
+              <div class="hc-info">
+                <div class="hc-code">${m.code}</div>
+                <div class="hc-name">${m.name}</div>
+                <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">
+                  ${m.items.map(h => `<span class="mini-badge broker-bg-${this._brokerKey(h.broker||'その他')}">${h.broker||'その他'} ${h.account}</span>`).join('')}
+                </div>
+              </div>
+              <div class="hc-pnl">
+                <div class="hc-pnl-val ${sc(m.totalPnl)}">${sg(m.totalPnl)}${yen(m.totalPnl)}</div>
+                <div class="hc-pnl-pct ${sc(m.pnlPct)}">${sg(m.pnlPct)}${pct(m.pnlPct)}</div>
+              </div>
+            </div>
+            <div class="hc-grid">
+              <div class="hc-stat"><div class="hc-label">合計株数</div><div class="hc-value">${num(m.totalShares)}</div></div>
+              <div class="hc-stat"><div class="hc-label">加重平均単価</div><div class="hc-value">${yen(m.avgCost,1)}</div></div>
+              <div class="hc-stat"><div class="hc-label">現在値</div><div class="hc-value">${m.price!==m.avgCost?yen(m.price,1):'未取得'}</div></div>
+              <div class="hc-stat"><div class="hc-label">合計評価額</div><div class="hc-value">${yen(m.totalValue)}</div></div>
+              <div class="hc-stat"><div class="hc-label">前日比</div><div class="hc-value ${sc(m.totalDay)}">${sg(m.totalDay)}${yen(m.totalDay)}</div></div>
+              <div class="hc-stat"><div class="hc-label">損益率</div><div class="hc-value ${sc(m.pnlPct)}">${sg(m.pnlPct)}${pct(m.pnlPct)}</div></div>
+            </div>
+            ${m.items.length > 1 ? `
+            <details class="inner-detail">
+              <summary>内訳 (${m.items.length}口座)</summary>
+              ${m.items.map(h => `
+                <div class="inner-row">
+                  <span><span class="broker-dot broker-dot-${this._brokerKey(h.broker||'その他')}"></span>${h.broker||'その他'} <span class="account-badge ${h.account}">${h.account}</span></span>
+                  <span>${num(h.shares)}株 ${yen(h.avgCost,1)}</span>
+                  <span class="${sc(h.pnl)}">${sg(h.pnl)}${yen(h.pnl)}</span>
+                  <button class="action-btn" onclick="App.openModal('${h.id}')">編集</button>
+                </div>`).join('')}
+            </details>` : ''}
+          </div>`).join('')}
+      </div>`;
+  },
+
+  _toggleMergedDetail(code) {
+    const row  = document.getElementById(`detail-${code}`);
+    const icon = document.getElementById(`expand-${code}`);
+    if (!row) return;
+    const open = row.style.display === 'none' || row.style.display === '';
+    row.style.display  = open ? 'table-row' : 'none';
+    if (icon) icon.textContent = open ? '▲' : '▼';
+  },
+
+  setHoldView(v) { this.holdView = v; this.renderHoldings(); },
 
   _brokerKey(b) {
     return { 'SBI証券':'sbi','楽天証券':'rakuten','松井証券':'matsui','マネックス証券':'monex','その他':'other' }[b] ?? 'other';

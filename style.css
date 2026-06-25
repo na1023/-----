@@ -354,6 +354,56 @@ tbody tr:hover td { background: #f8fafc; }
   display: flex; align-items: center; gap: 4px;
 }
 
+/* ===== View toggle (証券会社別 / 銘柄別合算) ===== */
+.view-toggle {
+  display: flex; border: 1.5px solid var(--border); border-radius: 8px; overflow: hidden;
+}
+.view-tab {
+  display: flex; align-items: center; gap: 5px;
+  padding: 6px 12px; border: none; background: var(--surface);
+  font-size: .8125rem; font-weight: 500; color: var(--text-2);
+  cursor: pointer; transition: all .15s; white-space: nowrap;
+}
+.view-tab:first-child { border-right: 1.5px solid var(--border); }
+.view-tab.active { background: var(--primary); color: white; }
+.view-tab.active svg { stroke: white; }
+
+/* 合算ビュー */
+.merged-note {
+  display: flex; align-items: center; gap: 6px;
+  font-size: .8125rem; color: var(--text-2);
+  background: var(--primary-light); border: 1px solid #bfdbfe;
+  border-radius: 8px; padding: 8px 12px; margin-bottom: 16px;
+}
+.merged-row:hover { background: #f8fafc; }
+.merged-row td { vertical-align: middle; }
+.expand-icon { color: var(--text-3); font-size: .75rem; user-select: none; }
+
+/* 内訳インナーテーブル */
+.inner-table { width: 100%; border-collapse: collapse; background: #f8fafc; }
+.inner-table th { padding: 6px 12px; font-size: .75rem; font-weight: 600; color: var(--text-2); border-bottom: 1px solid var(--border); background: #f1f5f9; text-align: left; }
+.inner-table th.num, .inner-table td.num { text-align: right; }
+.inner-table td { padding: 7px 12px; font-size: .8125rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.inner-table tr:last-child td { border-bottom: none; }
+
+/* ミニバッジ（証券会社タグ） */
+.mini-badge {
+  display: inline-block; font-size: .6875rem; font-weight: 600;
+  padding: 1px 6px; border-radius: 4px; white-space: nowrap;
+}
+.broker-bg-sbi     { background: #fff3e0; color: #c2410c; }
+.broker-bg-rakuten { background: #fef2f2; color: #b91c1c; }
+.broker-bg-matsui  { background: #eff6ff; color: #1d4ed8; }
+.broker-bg-monex   { background: #f5f3ff; color: #6d28d9; }
+.broker-bg-other   { background: #f1f5f9; color: #475569; }
+
+/* モバイル内訳 details */
+.inner-detail { margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
+.inner-detail summary { font-size: .8125rem; color: var(--primary); font-weight: 600; cursor: pointer; padding: 4px 0; }
+.inner-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: .8125rem; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+.inner-row:last-child { border-bottom: none; }
+.inner-row span:first-child { flex: 1; min-width: 0; }
+
 /* ===== Misc ===== */
 .spinner { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin .7s linear infinite; display: inline-block; }
 .section-title { font-size: 1rem; font-weight: 700; margin-bottom: 12px; }
