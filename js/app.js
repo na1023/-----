@@ -439,63 +439,32 @@ const App = {
     input.click();
   },
 
-  _parseCsvHoldings(text, filename) {
+  _parseCsvHoldings(rawText, filename) {
+    // BOM除去
+    const text = rawText.replace(/^﻿/, '');
     const lines = text.split(/\r?\n/);
-    const parsed = [];
-    let currentAccount = '特定';
 
-    // SBI保有証券一覧CSV: 口座区分はセクションヘッダーから取得
-    const accountMap = { '特定預り': '特定', '一般預り': '一般', 'NISA預り': 'NISA', '成長投資枠': 'NISA', '積立投資枠': 'NISA' };
+    // ブローカー自動判定
+    const broker = this._detectBroker(text, filename);
+    Toast.show(`${broker}形式で読み込み中…`, 'info', 2000);
 
-    // ヘッダー行を探す
-    let headerIdx = -1;
-    let codeCol = -1, nameCol = -1, sharesCol = -1, costCol = -1;
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-
-      // 口座区分セクションヘッダー検出
-      for (const [key, val] of Object.entries(accountMap)) {
-        if (line.includes(key)) { currentAccount = val; break; }
-      }
-
-      // ヘッダー行検出（銘柄コード列を探す）
-      if (line.includes('銘柄コード') || line.includes('コード')) {
-        const cols = this._splitCsvLine(line);
-        codeCol   = cols.findIndex(c => /銘柄コード|コード/.test(c));
-        nameCol   = cols.findIndex(c => /銘柄名|銘柄/.test(c) && !/コード/.test(c));
-        sharesCol = cols.findIndex(c => /保有株数|株数|数量/.test(c));
-        costCol   = cols.findIndex(c => /取得単価|平均取得|単価/.test(c));
-        if (codeCol >= 0 && sharesCol >= 0) { headerIdx = i; }
-        continue;
-      }
-
-      if (headerIdx < 0) continue;
-
-      const cols = this._splitCsvLine(line);
-      if (cols.length < 3) continue;
-
-      const code   = codeCol >= 0 ? cols[codeCol]?.replace(/\D/g, '') : '';
-      const name   = nameCol >= 0 ? cols[nameCol]?.trim() : '';
-      const shares = sharesCol >= 0 ? parseFloat(cols[sharesCol]?.replace(/,/g, '')) : 0;
-      const cost   = costCol >= 0 ? parseFloat(cols[costCol]?.replace(/,/g, '')) : 0;
-
-      if (!code || code.length < 4 || !shares || shares <= 0) continue;
-
-      parsed.push({ code, name: name || code, shares, avgCost: cost || 0, account: currentAccount });
-    }
+    let parsed = [];
+    if      (broker === 'SBI')     parsed = this._parseSBI(lines);
+    else if (broker === '楽天')    parsed = this._parseRakuten(lines);
+    else if (broker === '松井')    parsed = this._parseMatsui(lines);
+    else if (broker === 'マネックス') parsed = this._parseMonex(lines);
+    else                           parsed = this._parseGeneric(lines);
 
     if (!parsed.length) {
-      Toast.show('有効な銘柄が見つかりませんでした。SBI保有証券一覧CSVをご確認ください。', 'error', 5000);
+      Toast.show('有効な銘柄が見つかりませんでした。対応: SBI・楽天・松井・マネックス保有一覧CSV', 'error', 6000);
       return;
     }
 
-    // 確認ダイアログ
-    const msg = `${parsed.length}件の銘柄を検出しました。\n\n` +
-      parsed.map(h => `${h.code} ${h.name} ${h.shares}株 @${h.avgCost}円 [${h.account}]`).join('\n') +
-      '\n\n【追加】既存データに追記\n【置換】既存データをすべて置き換え';
-
-    const mode = confirm(msg + '\n\nOK=追加 / キャンセル=置換') ? 'append' : 'replace';
+    const preview = parsed.slice(0, 5).map(h => `${h.code} ${h.name}  ${h.shares}株 @${h.avgCost || '—'}円 [${h.account}]`).join('\n');
+    const more = parsed.length > 5 ? `\n…他 ${parsed.length - 5}件` : '';
+    const mode = confirm(
+      `【${broker}】${parsed.length}件を検出:\n\n${preview}${more}\n\nOK = 既存に追加\nキャンセル = 全て置き換え`
+    ) ? 'append' : 'replace';
 
     if (mode === 'replace') {
       if (!confirm('既存の保有銘柄を全て削除して置き換えますか？')) return;
@@ -506,8 +475,9 @@ const App = {
     parsed.forEach(h => {
       const exists = this.holdings.find(x => x.code === h.code && x.account === h.account);
       if (exists) {
-        exists.shares   = h.shares;
-        exists.avgCost  = h.avgCost;
+        exists.shares    = h.shares;
+        exists.avgCost   = h.avgCost;
+        exists.name      = h.name || exists.name;
         exists.updatedAt = Date.now();
       } else {
         this.holdings.push({ id: uid(), ...h, memo: '', addedAt: Date.now(), updatedAt: Date.now() });
@@ -517,16 +487,164 @@ const App = {
 
     HoldingStorage.save(this.holdings);
     Sync.push();
-    Toast.show(`${parsed.length}件インポート完了（新規${added}件・更新${parsed.length - added}件）`, 'success', 5000);
+    Toast.show(`インポート完了：新規${added}件・更新${parsed.length - added}件`, 'success', 5000);
 
-    // 株価・配当を取得
     const codes = [...new Set(parsed.map(h => h.code))];
     this._fetchQuotes(codes, false).then(() => this.renderPage());
     this._fetchDividends(codes);
     this.renderPage();
   },
 
-  _splitCsvLine(line) {
+  _detectBroker(text, filename) {
+    const t = text.slice(0, 500) + (filename || '');
+    if (/SBI|sbi|エスビーアイ/i.test(t) || /預り区分|株式（特定|株式（一般|株式（NISA/.test(t)) return 'SBI';
+    if (/楽天証券|rakuten/i.test(t) || /お預り/.test(t)) return '楽天';
+    if (/松井証券|matsui/i.test(t) || /建玉/.test(t)) return '松井';
+    if (/マネックス|monex/i.test(t)) return 'マネックス';
+    return '汎用';
+  },
+
+  /* SBI証券 保有証券一覧CSV */
+  _parseSBI(lines) {
+    const accountMap = { '特定預り':'特定','一般預り':'一般','NISA預り':'NISA','成長投資枠':'NISA','積立投資枠':'NISA' };
+    let account = '特定', headerIdx = -1;
+    let codeCol = -1, nameCol = -1, sharesCol = -1, costCol = -1;
+    const result = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      for (const [k, v] of Object.entries(accountMap)) { if (line.includes(k)) account = v; }
+
+      if (headerIdx < 0 && (line.includes('銘柄コード') || line.includes('コード'))) {
+        const cols = this._splitCsv(line);
+        codeCol   = cols.findIndex(c => /銘柄コード|コード/.test(c));
+        nameCol   = cols.findIndex(c => /銘柄名|銘柄/.test(c) && !/コード/.test(c));
+        sharesCol = cols.findIndex(c => /保有株数|株数|数量/.test(c));
+        costCol   = cols.findIndex(c => /取得単価|平均取得/.test(c));
+        if (codeCol >= 0 && sharesCol >= 0) headerIdx = i;
+        continue;
+      }
+      if (headerIdx < 0) continue;
+      const cols = this._splitCsv(line);
+      const h = this._extractHolding(cols, codeCol, nameCol, sharesCol, costCol, account);
+      if (h) result.push(h);
+    }
+    return result;
+  },
+
+  /* 楽天証券 保有株式一覧CSV */
+  _parseRakuten(lines) {
+    let headerIdx = -1;
+    let codeCol = -1, nameCol = -1, sharesCol = -1, costCol = -1, accountCol = -1;
+    const result = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (headerIdx < 0 && /銘柄コード|コード|証券コード/.test(line)) {
+        const cols = this._splitCsv(line);
+        codeCol    = cols.findIndex(c => /銘柄コード|コード|証券コード/.test(c));
+        nameCol    = cols.findIndex(c => /銘柄名|銘柄/.test(c) && !/コード/.test(c));
+        sharesCol  = cols.findIndex(c => /保有数量|数量|株数/.test(c));
+        costCol    = cols.findIndex(c => /平均取得単価|取得単価|平均単価/.test(c));
+        accountCol = cols.findIndex(c => /口座|預り区分/.test(c));
+        if (codeCol >= 0 && sharesCol >= 0) headerIdx = i;
+        continue;
+      }
+      if (headerIdx < 0) continue;
+      const cols   = this._splitCsv(line);
+      const accRaw = accountCol >= 0 ? cols[accountCol] ?? '' : '';
+      const account = /NISA|成長|積立/.test(accRaw) ? 'NISA' : /一般/.test(accRaw) ? '一般' : '特定';
+      const h = this._extractHolding(cols, codeCol, nameCol, sharesCol, costCol, account);
+      if (h) result.push(h);
+    }
+    return result;
+  },
+
+  /* 松井証券 */
+  _parseMatsui(lines) {
+    let headerIdx = -1;
+    let codeCol = -1, nameCol = -1, sharesCol = -1, costCol = -1;
+    const result = [];
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (headerIdx < 0 && /銘柄コード|コード/.test(line)) {
+        const cols = this._splitCsv(line);
+        codeCol   = cols.findIndex(c => /銘柄コード|コード/.test(c));
+        nameCol   = cols.findIndex(c => /銘柄名|銘柄/.test(c) && !/コード/.test(c));
+        sharesCol = cols.findIndex(c => /保有株数|株数|数量|残高/.test(c));
+        costCol   = cols.findIndex(c => /平均取得単価|取得単価|取得コスト/.test(c));
+        if (codeCol >= 0 && sharesCol >= 0) headerIdx = i;
+        continue;
+      }
+      if (headerIdx < 0) continue;
+      const h = this._extractHolding(this._splitCsv(line), codeCol, nameCol, sharesCol, costCol, '特定');
+      if (h) result.push(h);
+    }
+    return result;
+  },
+
+  /* マネックス証券 */
+  _parseMonex(lines) {
+    let headerIdx = -1;
+    let codeCol = -1, nameCol = -1, sharesCol = -1, costCol = -1, accountCol = -1;
+    const result = [];
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (headerIdx < 0 && /銘柄コード|コード/.test(line)) {
+        const cols = this._splitCsv(line);
+        codeCol    = cols.findIndex(c => /銘柄コード|コード/.test(c));
+        nameCol    = cols.findIndex(c => /銘柄名|銘柄/.test(c) && !/コード/.test(c));
+        sharesCol  = cols.findIndex(c => /保有数量|数量|株数/.test(c));
+        costCol    = cols.findIndex(c => /取得単価|平均取得/.test(c));
+        accountCol = cols.findIndex(c => /口座種別|口座区分/.test(c));
+        if (codeCol >= 0 && sharesCol >= 0) headerIdx = i;
+        continue;
+      }
+      if (headerIdx < 0) continue;
+      const cols   = this._splitCsv(line);
+      const accRaw = accountCol >= 0 ? cols[accountCol] ?? '' : '';
+      const account = /NISA/.test(accRaw) ? 'NISA' : /一般/.test(accRaw) ? '一般' : '特定';
+      const h = this._extractHolding(cols, codeCol, nameCol, sharesCol, costCol, account);
+      if (h) result.push(h);
+    }
+    return result;
+  },
+
+  /* 汎用フォーマット（銘柄コード列を自動検出） */
+  _parseGeneric(lines) {
+    let headerIdx = -1;
+    let codeCol = -1, nameCol = -1, sharesCol = -1, costCol = -1;
+    const result = [];
+    for (let i = 0; i < lines.length; i++) {
+      const cols = this._splitCsv(lines[i]);
+      if (headerIdx < 0) {
+        const ci = cols.findIndex(c => /コード|code/i.test(c));
+        const si = cols.findIndex(c => /株数|数量|保有/i.test(c));
+        if (ci >= 0 && si >= 0) {
+          codeCol   = ci;
+          nameCol   = cols.findIndex(c => /名|name/i.test(c) && !/コード/.test(c));
+          sharesCol = si;
+          costCol   = cols.findIndex(c => /単価|価格|コスト/i.test(c));
+          headerIdx = i;
+        }
+        continue;
+      }
+      const h = this._extractHolding(cols, codeCol, nameCol, sharesCol, costCol, '特定');
+      if (h) result.push(h);
+    }
+    return result;
+  },
+
+  _extractHolding(cols, codeCol, nameCol, sharesCol, costCol, account) {
+    const code   = (codeCol >= 0 ? cols[codeCol] ?? '' : '').replace(/[^\d]/g, '');
+    const name   = nameCol >= 0 ? (cols[nameCol] ?? '').trim() : '';
+    const shares = sharesCol >= 0 ? parseFloat((cols[sharesCol] ?? '').replace(/,/g, '')) : 0;
+    const cost   = costCol >= 0  ? parseFloat((cols[costCol]  ?? '').replace(/,/g, '')) : 0;
+    if (!code || code.length < 4 || !shares || shares <= 0) return null;
+    return { code, name: name || code, shares, avgCost: isNaN(cost) ? 0 : cost, account };
+  },
+
+  _splitCsv(line) {
     const result = [];
     let cur = '', inQ = false;
     for (const ch of line) {
