@@ -10,6 +10,12 @@ const HoldingStorage = {
   saveQuotes(d) { localStorage.setItem(this.QUOTE_KEY, JSON.stringify(d)); },
 };
 
+const DividendStorage = {
+  KEY: 'kabu_divs_v2',
+  load()   { try { return JSON.parse(localStorage.getItem(this.KEY) ?? '{}'); } catch { return {}; } },
+  save(d)  { localStorage.setItem(this.KEY, JSON.stringify(d)); },
+};
+
 /* ===== Helpers ===== */
 function uid() { return (crypto.randomUUID?.() ?? Date.now().toString(36) + Math.random().toString(36).slice(2)); }
 
@@ -59,8 +65,9 @@ const App = {
   _acTimer: null,
 
   async init() {
-    this.holdings = HoldingStorage.load();
-    this.quotes   = HoldingStorage.loadQuotes();
+    this.holdings  = HoldingStorage.load();
+    this.quotes    = HoldingStorage.loadQuotes();
+    this.dividends = DividendStorage.load();
 
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
 
@@ -69,7 +76,7 @@ const App = {
       btn.addEventListener('click', () => this.navigate(btn.dataset.page)));
 
     // Add buttons
-    ['sidebarAddBtn', 'topbarAddBtn', 'mobileAddBtn'].forEach(id =>
+    ['sidebarAddBtn', 'topbarAddBtn'].forEach(id =>
       document.getElementById(id)?.addEventListener('click', () => this.openModal()));
 
     // Modal
@@ -106,7 +113,7 @@ const App = {
 
     if (this.holdings.length > 0) {
       await this._fetchQuotes(this.holdings.map(h => h.code), false);
-      this._fetchDividends(this.holdings.map(h => h.code));
+      this._fixMissingNames();
       this.renderPage();
     }
 
@@ -161,13 +168,22 @@ const App = {
     this.renderPage();
   },
 
-  async _fetchDividends(codes) {
-    if (!codes.length) return;
-    try {
-      const result = await YahooFinance.getDividendsMany(codes);
-      Object.assign(this.dividends, result);
-      this.renderPage();
-    } catch { /* silent */ }
+  // 銘柄名がコードになっている保有株の名前をYahoo検索で修正
+  async _fixMissingNames() {
+    const broken = this.holdings.filter(h => !h.name || h.name === h.code);
+    if (!broken.length) return;
+    let fixed = false;
+    for (const h of broken) {
+      try {
+        const results = await YahooFinance.searchSymbol(h.code);
+        const match = results.find(r => r.code === h.code) ?? results[0];
+        if (match?.name && match.name !== h.code) {
+          const idx = this.holdings.findIndex(x => x.id === h.id);
+          if (idx >= 0) { this.holdings[idx].name = match.name; fixed = true; }
+        }
+      } catch { /* silent */ }
+    }
+    if (fixed) { HoldingStorage.save(this.holdings); this.renderPage(); }
   },
 
   /* ===== Dashboard ===== */
@@ -284,12 +300,10 @@ const App = {
   _annualDivEstimate() {
     const year = new Date().getFullYear();
     let total = 0;
-    this.holdings.forEach(h => {
-      const divs = this.dividends[h.code] ?? [];
-      const recent = divs.filter(d => d.date >= `${year - 1}-01-01`);
-      if (!recent.length) return;
-      const perShare = recent.reduce((s, d) => s + d.amount, 0);
-      total += perShare * h.shares;
+    Object.values(this.dividends).forEach(divs => {
+      (divs || []).filter(d => String(d.date) >= `${year - 1}-01-01`).forEach(d => {
+        total += d.gross ?? 0;
+      });
     });
     return total;
   },
@@ -533,8 +547,7 @@ const App = {
     Toast.show(`インポート完了：新規${added}件・更新${parsed.length - added}件`, 'success', 5000);
 
     const codes = [...new Set(parsed.map(h => h.code))];
-    this._fetchQuotes(codes, false).then(() => this.renderPage());
-    this._fetchDividends(codes);
+    this._fetchQuotes(codes, false).then(() => { this._fixMissingNames(); this.renderPage(); });
     this.renderPage();
   },
 
@@ -705,9 +718,9 @@ const App = {
     const years  = Array.from({ length: 6 }, (_, i) => new Date().getFullYear() - i);
     const result = Portfolio.annualDividend(this.holdings, this.dividends, year, this.taxAfter);
     const months = Portfolio.monthlyDividend(this.holdings, this.dividends, year, this.taxAfter);
-    const monthMax = Math.max(...months);
     const totalPre  = Portfolio.annualDividend(this.holdings, this.dividends, year, false).total;
     const totalPost = Portfolio.annualDividend(this.holdings, this.dividends, year, true).total;
+    const hasAny = Object.keys(this.dividends).length > 0;
 
     const el = document.getElementById('page-area');
     el.innerHTML = `
@@ -715,9 +728,16 @@ const App = {
         <div class="year-tabs">
           ${years.map(y => `<button class="year-tab ${y===year?'active':''}" onclick="App.setDivYear(${y})">${y}年</button>`).join('')}
         </div>
-        <div class="tax-toggle">
-          <button class="tax-btn ${!this.taxAfter?'active':''}" onclick="App.setTax(false)">税引前</button>
-          <button class="tax-btn ${this.taxAfter?'active':''}" onclick="App.setTax(true)">税引後</button>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <div class="tax-toggle">
+            <button class="tax-btn ${!this.taxAfter?'active':''}" onclick="App.setTax(false)">税引前</button>
+            <button class="tax-btn ${this.taxAfter?'active':''}" onclick="App.setTax(true)">税引後</button>
+          </div>
+          <button class="btn-primary-sm" onclick="App.triggerDivCsvImport()" style="display:flex;align-items:center;gap:5px;font-size:.8125rem">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            配当CSV取込
+          </button>
+          ${hasAny ? `<button class="btn-ghost" onclick="App.clearDividends()" style="font-size:.8125rem;padding:6px 12px;color:var(--loss)">配当データ削除</button>` : ''}
         </div>
       </div>
 
@@ -744,7 +764,12 @@ const App = {
         <div class="div-chart-wrap"><canvas id="chart-div"></canvas></div>
       </div>
 
-      ${result.byStock.length ? `
+      ${!hasAny ? `<div class="empty-state">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
+        <h3>配当データがありません</h3>
+        <p>「配当CSV取込」から証券会社の配当金履歴CSVを読み込んでください</p>
+        <button class="btn-primary-lg" onclick="App.triggerDivCsvImport()">配当CSV取込</button>
+      </div>` : result.byStock.length ? `
       <div class="table-wrap">
         <table>
           <thead><tr>
@@ -795,6 +820,113 @@ const App = {
 
   setDivYear(y) { this.divYear = y; this.renderDividends(); },
   setTax(after) { this.taxAfter = after; this.renderDividends(); },
+
+  triggerDivCsvImport() {
+    const input = document.createElement('input');
+    input.type = 'file'; input.accept = '.csv,text/csv';
+    input.onchange = e => {
+      const file = e.target.files[0]; if (!file) return;
+      const reader = new FileReader();
+      reader.onload = ev => this._parseDivCsv(ev.target.result, file.name);
+      reader.onerror = () => Toast.show('ファイル読み込みエラー', 'error');
+      // Shift_JIS対応
+      reader.readAsText(file, 'Shift_JIS');
+    };
+    input.click();
+  },
+
+  _parseDivCsv(rawText, filename) {
+    // UTF-8フォールバック（文字化けを検知）
+    const text = rawText.includes('�') ? rawText : rawText;
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (!lines.length) { Toast.show('CSVが空です', 'error'); return; }
+
+    let headerIdx = -1, dateCol = -1, codeCol = -1, nameCol = -1;
+    let grossCol = -1, netCol = -1, perShareCol = -1, sharesCol = -1;
+
+    for (let i = 0; i < Math.min(lines.length, 20); i++) {
+      const cols = this._splitCsv(lines[i]);
+      // ヘッダー行の検出
+      const hasDivKey = cols.some(c => /受取日|入金日|支払日|配当|dividend/i.test(c));
+      if (!hasDivKey) continue;
+      dateCol     = cols.findIndex(c => /受取日|入金日|支払日|決済日/i.test(c));
+      codeCol     = cols.findIndex(c => /銘柄コード|証券コード|コード/i.test(c));
+      nameCol     = cols.findIndex(c => /銘柄名|銘柄/i.test(c) && !/コード/.test(c));
+      perShareCol = cols.findIndex(c => /単価|1株|一株/i.test(c));
+      sharesCol   = cols.findIndex(c => /数量|株数/i.test(c));
+      grossCol    = cols.findIndex(c => /税引前|配当金額.*税引前|gross/i.test(c));
+      netCol      = cols.findIndex(c => /税引後|配当金額.*税引後|net/i.test(c));
+      if (dateCol >= 0 && (codeCol >= 0 || grossCol >= 0)) { headerIdx = i; break; }
+    }
+
+    if (headerIdx < 0) {
+      Toast.show('配当CSVの形式を認識できませんでした。SBI証券・楽天証券の配当金履歴CSVに対応しています', 'error', 6000);
+      return;
+    }
+
+    const parsed = [];
+    for (let i = headerIdx + 1; i < lines.length; i++) {
+      const cols = this._splitCsv(lines[i]);
+      if (cols.length < 2) continue;
+
+      const rawDate = dateCol >= 0 ? (cols[dateCol] ?? '') : '';
+      const dateStr = rawDate.replace(/\//g, '-').replace(/年|月/g, '-').replace(/日/, '').trim().slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) continue;
+
+      const code  = codeCol >= 0 ? (cols[codeCol] ?? '').replace(/[^\d]/g, '') : '';
+      const name  = nameCol >= 0 ? (cols[nameCol] ?? '').trim() : '';
+      const gross = grossCol >= 0    ? parseFloat((cols[grossCol] ?? '').replace(/,/g, '')) : NaN;
+      const net   = netCol >= 0      ? parseFloat((cols[netCol]   ?? '').replace(/,/g, '')) : NaN;
+      const perShare = perShareCol >= 0 ? parseFloat((cols[perShareCol] ?? '').replace(/,/g, '')) : NaN;
+
+      if (!code || code.length < 4) continue;
+      if (isNaN(gross) && isNaN(net)) continue;
+
+      parsed.push({
+        code, name, date: dateStr,
+        gross:    isNaN(gross) ? 0 : gross,
+        net:      isNaN(net)   ? 0 : net,
+        perShare: isNaN(perShare) ? 0 : perShare,
+      });
+    }
+
+    if (!parsed.length) { Toast.show('配当データが見つかりませんでした', 'error'); return; }
+
+    // 既存に追加 or 年ごと置換を選択
+    const preview = [...new Set(parsed.map(d => d.code))].slice(0, 5).join(', ');
+    const mode = confirm(
+      `配当データ ${parsed.length}件を検出:\n銘柄: ${preview}…\n\nOK = 既存に追加（重複は上書き）\nキャンセル = キャンセル`
+    );
+    if (!mode) return;
+
+    let added = 0, updated = 0;
+    parsed.forEach(d => {
+      if (!this.dividends[d.code]) this.dividends[d.code] = [];
+      const arr = this.dividends[d.code];
+      const existIdx = arr.findIndex(x => x.date === d.date);
+      if (existIdx >= 0) { arr[existIdx] = d; updated++; }
+      else               { arr.push(d); added++; }
+      // 銘柄名も更新（コードのままになっている場合）
+      if (d.name) {
+        const h = this.holdings.find(h => h.code === d.code);
+        if (h && (!h.name || h.name === h.code)) h.name = d.name;
+      }
+    });
+
+    DividendStorage.save(this.dividends);
+    HoldingStorage.save(this.holdings);
+    Sync.push();
+    Toast.show(`配当データ取込完了：新規${added}件・更新${updated}件`, 'success', 5000);
+    this.renderDividends();
+  },
+
+  clearDividends() {
+    if (!confirm('配当データを全て削除しますか？')) return;
+    this.dividends = {};
+    DividendStorage.save({});
+    Toast.show('配当データを削除しました', 'info');
+    this.renderDividends();
+  },
 
   /* ===== P&L ===== */
   renderPnL() {
@@ -1019,8 +1151,7 @@ const App = {
       Toast.show('追加しました', 'success');
       // Fetch quote & dividends for new holding
       if (code) {
-        this._fetchQuotes([code], false).then(() => this.renderPage());
-        this._fetchDividends([code]);
+        this._fetchQuotes([code], false).then(() => { this._fixMissingNames(); this.renderPage(); });
       }
     }
 

@@ -446,14 +446,6 @@ tbody tr:hover td { background: #f8fafc; }
   .bnav-item svg { width: 22px; height: 22px; flex-shrink: 0; }
   .bnav-item span { white-space: nowrap; }
   .bnav-item.active { color: var(--primary); }
-  .bnav-center {
-    width: 50px; height: 50px; border-radius: 50%;
-    background: var(--primary); color: white;
-    border: none; cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0;
-    box-shadow: 0 4px 14px rgba(37,99,235,.45);
-  }
 
   /* Settings */
   .settings-section { padding: 16px; }

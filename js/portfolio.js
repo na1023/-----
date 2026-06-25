@@ -1,6 +1,8 @@
 'use strict';
 
 const Portfolio = (() => {
+  const TAX = 1 - 0.20315;
+
   function calc(h, quote) {
     const price     = quote?.price ?? h.avgCost;
     const cost      = h.avgCost * h.shares;
@@ -25,30 +27,35 @@ const Portfolio = (() => {
     return { totalValue, totalCost, pnl, pnlPct, dayChg };
   }
 
+  // dividends[code] = [{ date, gross, net, perShare }]  ← CSV実績金額
   function annualDividend(holdings, dividends, year, taxAfter = false) {
-    const TAX = 1 - 0.20315;
     let total = 0;
-    const byStock = holdings.map(h => {
-      const divs     = dividends[h.code] ?? [];
-      const yearDivs = divs.filter(d => d.date.startsWith(String(year)));
-      const perShare = yearDivs.reduce((s, d) => s + d.amount, 0);
-      const gross    = perShare * h.shares;
-      const net      = gross * TAX;
+    const byCode = {};
+
+    Object.entries(dividends).forEach(([code, divs]) => {
+      const yearDivs = (divs || []).filter(d => String(d.date).startsWith(String(year)));
+      if (!yearDivs.length) return;
+      const gross    = yearDivs.reduce((s, d) => s + (d.gross ?? 0), 0);
+      const net      = yearDivs.reduce((s, d) => s + (d.net   ?? gross * TAX), 0);
+      const perShare = yearDivs.reduce((s, d) => s + (d.perShare ?? 0), 0);
       const amount   = taxAfter ? net : gross;
       total += amount;
-      return { code: h.code, name: h.name, shares: h.shares, account: h.account, perShare, gross, net, amount };
+      const h = holdings.find(h => h.code === code) ?? { code, name: code, shares: 0, account: '—' };
+      byCode[code] = { code, name: h.name, shares: h.shares, account: h.account, perShare, gross, net, amount };
     });
-    return { total, byStock: byStock.filter(x => x.perShare > 0).sort((a, b) => b.amount - a.amount) };
+
+    const byStock = Object.values(byCode).sort((a, b) => b.amount - a.amount);
+    return { total, byStock };
   }
 
   function monthlyDividend(holdings, dividends, year, taxAfter = false) {
-    const TAX    = 1 - 0.20315;
     const months = Array.from({ length: 12 }, () => 0);
-    holdings.forEach(h => {
-      (dividends[h.code] ?? []).filter(d => d.date.startsWith(String(year))).forEach(d => {
-        const m     = parseInt(d.date.slice(5, 7), 10) - 1;
-        const gross = d.amount * h.shares;
-        months[m]  += taxAfter ? gross * TAX : gross;
+    Object.values(dividends).forEach(divs => {
+      (divs || []).filter(d => String(d.date).startsWith(String(year))).forEach(d => {
+        const m     = parseInt(String(d.date).slice(5, 7), 10) - 1;
+        const gross = d.gross ?? 0;
+        const net   = d.net   ?? gross * TAX;
+        if (m >= 0 && m < 12) months[m] += taxAfter ? net : gross;
       });
     });
     return months;
