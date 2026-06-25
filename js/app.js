@@ -1,1328 +1,948 @@
 'use strict';
 
-/* ============================================================
-   Storage
-   ============================================================ */
-const TradeStorage = {
-  KEY: 'kabu_trades_v2',
-  load() {
-    try {
-      const raw = localStorage.getItem(this.KEY);
-      if (!raw) return [];
-      const d = JSON.parse(raw);
-      return (Array.isArray(d) ? d : d.trades ?? []).map(t => ({ id: t.id ?? Utils.uid(), ...t }));
-    } catch { return []; }
-  },
-  saveLocal(trades) { localStorage.setItem(this.KEY, JSON.stringify(trades)); },
-  save(trades) {
-    this.saveLocal(trades);
-    if (typeof Sync !== 'undefined') Sync.push();
-  },
-  exportJSON(trades) {
-    const blob = new Blob([JSON.stringify({ version: 2, exportedAt: new Date().toISOString(), trades }, null, 2)], { type: 'application/json' });
-    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `kabu_backup_${new Date().toISOString().slice(0,10)}.json` });
-    a.click(); URL.revokeObjectURL(a.href);
-  },
-  importJSON(text) {
-    const d = JSON.parse(text);
-    const arr = Array.isArray(d) ? d : (d.trades ?? []);
-    if (!Array.isArray(arr)) throw new Error('invalid');
-    return arr.map(t => ({ id: t.id ?? Utils.uid(), source: t.source ?? 'backup', ...t }));
-  },
+/* ===== Storage ===== */
+const HoldingStorage = {
+  KEY: 'kabu_holdings_v1',
+  QUOTE_KEY: 'kabu_q_cache_v2',
+  load()        { try { return JSON.parse(localStorage.getItem(this.KEY) ?? '[]'); } catch { return []; } },
+  save(d)       { localStorage.setItem(this.KEY, JSON.stringify(d)); },
+  loadQuotes()  { try { return JSON.parse(localStorage.getItem(this.QUOTE_KEY) ?? '{}'); } catch { return {}; } },
+  saveQuotes(d) { localStorage.setItem(this.QUOTE_KEY, JSON.stringify(d)); },
 };
 
-/* ============================================================
-   Toast
-   ============================================================ */
+/* ===== Helpers ===== */
+function uid() { return (crypto.randomUUID?.() ?? Date.now().toString(36) + Math.random().toString(36).slice(2)); }
+
+function yen(n, dec = 0) {
+  if (n == null || isNaN(n)) return '—';
+  const abs = Math.abs(n);
+  const str = abs.toLocaleString('ja-JP', { maximumFractionDigits: dec });
+  return (n < 0 ? '-' : '') + '¥' + str;
+}
+function pct(n, sign = true) {
+  if (n == null || isNaN(n)) return '—';
+  return (sign && n > 0 ? '+' : '') + n.toFixed(2) + '%';
+}
+function num(n) { return n == null ? '—' : n.toLocaleString('ja-JP'); }
+function sc(n) { return n > 0 ? 'gain' : n < 0 ? 'loss' : 'neutral'; }
+function sg(n) { return n > 0 ? '+' : ''; }
+function badge(n) {
+  if (n > 0) return `<span class="badge-gain">${sg(n)}${pct(n)}</span>`;
+  if (n < 0) return `<span class="badge-loss">${pct(n)}</span>`;
+  return `<span class="badge-neu">0.00%</span>`;
+}
+
+/* ===== Toast ===== */
 const Toast = {
-  _c: null,
-  init() { this._c = document.getElementById('toastContainer'); },
-  show(msg, type = 'info', ms = 3200) {
-    const icons = {
-      success: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>',
-      error:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
-      info:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
-    };
+  show(msg, type = 'info', ms = 3000) {
     const el = document.createElement('div');
-    el.className = `toast toast-${type}`;
-    el.innerHTML = (icons[type] ?? '') + `<span>${msg}</span>`;
-    this._c.appendChild(el);
-    setTimeout(() => { el.classList.add('hide'); el.addEventListener('animationend', () => el.remove()); }, ms);
+    el.className = `toast ${type}`;
+    el.textContent = msg;
+    document.getElementById('toast-wrap').appendChild(el);
+    setTimeout(() => el.remove(), ms);
   },
 };
 
-/* ============================================================
-   ChartManager
-   ============================================================ */
-const ChartMgr = {
-  _i: {},
-  P: ['#3b82f6','#6366f1','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#ec4899'],
-  destroy(id) { if (this._i[id]) { this._i[id].destroy(); delete this._i[id]; } },
-  destroyAll() { Object.keys(this._i).forEach(id => this.destroy(id)); },
-  make(id, cfg) { this.destroy(id); const c = document.getElementById(id); if (c) this._i[id] = new Chart(c, cfg); },
-
-  doughnut(id, labels, data) {
-    this.make(id, { type: 'doughnut', data: { labels, datasets: [{ data, backgroundColor: this.P, borderWidth: 2, borderColor: '#fff' }] },
-      options: { responsive: true, maintainAspectRatio: false, cutout: '60%',
-        plugins: { legend: { position: 'bottom', labels: { padding: 12, font: { size: 11 }, boxWidth: 11 } },
-          tooltip: { callbacks: { label: c => ` ${Utils.yen(c.raw)}` } } } } });
-  },
-
-  bar(id, labels, datasets, yFmt) {
-    this.make(id, { type: 'bar', data: { labels, datasets },
-      options: { responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { position: 'bottom', labels: { padding: 12, font: { size: 11 }, boxWidth: 11 } } },
-        scales: { x: { grid: { display: false } }, y: { ticks: { callback: yFmt ?? (v => Utils.yen(v)) }, grid: { color: '#f1f5f9' } } } } });
-  },
-
-  line(id, labels, data, label) {
-    this.make(id, { type: 'line', data: { labels, datasets: [{ label, data, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,.1)', fill: true, tension: 0.35, pointRadius: 3, borderWidth: 2 }] },
-      options: { responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 10 } }, y: { ticks: { callback: v => Utils.yen(v) }, grid: { color: '#f1f5f9' } } } } });
-  },
-
-  monthlyDiv(id, months, buyData, label = '受取配当') {
-    this.make(id, { type: 'bar', data: { labels: months, datasets: [{ label, data: buyData, backgroundColor: '#3b82f6', borderRadius: 4 }] },
-      options: { responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => ` ${Utils.yen(c.raw)}` } } },
-        scales: { x: { grid: { display: false } }, y: { ticks: { callback: v => v === 0 ? '¥0' : '¥' + (v/1000).toFixed(0) + 'k' }, grid: { color: '#f1f5f9' } } } } });
-  },
-};
-
-/* ============================================================
-   App
-   ============================================================ */
+/* ===== App ===== */
 const App = {
-  trades: [],
+  holdings: [],
+  quotes: {},
+  dividends: {},
+  quoteTime: null,
   page: 'dashboard',
-  sortKey: 'date', sortDir: -1,
-  hFilters: { q: '', account: '', side: '' },
-  editId: null,
+  divYear: new Date().getFullYear(),
+  taxAfter: false,
+  holdFilter: 'all',
+  _charts: {},
+  _editId: null,
+  _acTimer: null,
 
-  /* ---- 配当ページ状態 ---- */
-  divYear:    new Date().getFullYear(),
-  divTax:     'after',   // 'before' | 'after'
-  divYieldMode: 'cost',  // 'cost' | 'current'
-  divData:    {},        // { code: [{ date, amount }] }
-  quotes:     {},        // { code: { price, change, changePct, ... } }
+  async init() {
+    this.holdings = HoldingStorage.load();
+    this.quotes   = HoldingStorage.loadQuotes();
 
-  /* ---- 年度サマリー状態 ---- */
-  annualYear: new Date().getFullYear(),
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
 
-  /* ============================================================
-     Init
-     ============================================================ */
-  init() {
-    this.trades = TradeStorage.load();
-    this.quotes = this._loadQuoteCache();   // 前回の株価を即表示
-    this._loadSplits();                     // 株式分割（キャッシュ）を即反映
-    Toast.init();
-    this._setupSidebar();
-    this._setupModal();
-    this._setupNav();
+    // Nav
+    document.querySelectorAll('[data-page]').forEach(btn =>
+      btn.addEventListener('click', () => this.navigate(btn.dataset.page)));
 
-    const VALID = ['dashboard','portfolio','dividends','annual','history','charts','import','settings'];
-    const initPage = location.hash.slice(1);
-    this.navigate(VALID.includes(initPage) ? initPage : 'dashboard');
+    // Add buttons
+    ['sidebarAddBtn', 'topbarAddBtn', 'mobileAddBtn'].forEach(id =>
+      document.getElementById(id)?.addEventListener('click', () => this.openModal()));
 
+    // Modal
+    document.getElementById('modal-close').addEventListener('click',  () => this.closeModal());
+    document.getElementById('modal-cancel').addEventListener('click', () => this.closeModal());
+    document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') this.closeModal(); });
+    document.getElementById('modal-save').addEventListener('click', () => this.saveHolding());
+
+    // Account tabs in modal
+    document.querySelectorAll('#holding-modal .tab-btn').forEach(btn =>
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('#holding-modal .tab-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('m-account').value = btn.dataset.val;
+      }));
+
+    // Autocomplete
+    document.getElementById('m-code').addEventListener('input', () => this._onCodeInput());
+    document.getElementById('m-name').addEventListener('input', () => this._onNameInput());
+
+    // Refresh
+    document.getElementById('btn-refresh').addEventListener('click', () => this.refreshQuotes());
+
+    // Hash routing
+    const hash = location.hash.replace('#', '');
+    if (['dashboard','holdings','dividends','pnl','settings'].includes(hash)) this.page = hash;
     window.addEventListener('hashchange', () => {
-      const p = location.hash.slice(1);
-      if (VALID.includes(p) && p !== this.page) this.navigate(p);
+      const p = location.hash.replace('#', '');
+      if (p !== this.page) this.navigate(p, false);
     });
 
-    if (typeof Sync !== 'undefined') Sync.init();
+    Sync.init();
+    this.navigate(this.page, false);
 
-    // 開いている間は15分ごとに自動で株価を更新（保有ページ表示中のみ）
-    setInterval(() => {
-      if (this.page === 'portfolio') {
-        YahooFinance.clearMemCache();
-        this._fetchQuotes(Portfolio.getHoldings(this.trades));
-      }
-    }, 15 * 60 * 1000);
-
-    // アプリに復帰した時（タブ再表示）に最新化
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && this.page === 'portfolio') {
-        YahooFinance.clearMemCache();
-        this._fetchQuotes(Portfolio.getHoldings(this.trades));
-      }
-    });
-
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('./sw.js').catch(() => {});
+    if (this.holdings.length > 0) {
+      await this._fetchQuotes(this.holdings.map(h => h.code), false);
+      this._fetchDividends(this.holdings.map(h => h.code));
+      this.renderPage();
     }
+
+    setInterval(() => this.refreshQuotes(), 15 * 60 * 1000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) this.refreshQuotes(); });
   },
 
-  _setupSidebar() {
-    const sb = document.getElementById('sidebar');
-    const ov = document.getElementById('overlay');
-    const open  = () => { sb.classList.add('open');    ov.classList.add('active'); };
-    const close = () => { sb.classList.remove('open'); ov.classList.remove('active'); };
-    document.getElementById('menuBtn').addEventListener('click', open);
-    ov.addEventListener('click', close);
-    document.querySelectorAll('.nav-item').forEach(a => a.addEventListener('click', () => { if (window.innerWidth < 768) close(); }));
-  },
-
-  _setupNav() {
-    const TITLES = { dashboard:'ダッシュボード', portfolio:'保有銘柄', dividends:'配当管理', annual:'損益サマリー', history:'取引履歴', charts:'グラフ分析', import:'CSV取込', settings:'設定' };
-    [...document.querySelectorAll('.nav-item'), ...document.querySelectorAll('.bnav-item[data-page]')].forEach(el => {
-      el.addEventListener('click', () => this.navigate(el.dataset.page));
-    });
-    document.getElementById('sidebarNewBtn').addEventListener('click', () => this.openModal());
-    document.getElementById('topbarNewBtn').addEventListener('click', () => this.openModal());
-    document.getElementById('mobileNewBtn').addEventListener('click', () => this.openModal());
-    this._TITLES = TITLES;
-  },
-
-  navigate(page) {
-    if (!page) return;
+  navigate(page, updateHash = true) {
     this.page = page;
-    if (location.hash.slice(1) !== page) location.hash = page;
-    ChartMgr.destroyAll();
-    document.querySelectorAll('.nav-item,.bnav-item[data-page]').forEach(el => el.classList.toggle('active', el.dataset.page === page));
-    document.getElementById('pageTitle').textContent = this._TITLES[page] ?? page;
-    const renders = { dashboard: 'renderDashboard', portfolio: 'renderPortfolio', dividends: 'renderDividends', annual: 'renderAnnual', history: 'renderHistory', charts: 'renderCharts', import: 'renderImport', settings: 'renderSettings' };
-    const fn = renders[page];
+    if (updateHash) location.hash = page;
+    document.querySelectorAll('[data-page]').forEach(el =>
+      el.classList.toggle('active', el.dataset.page === page));
+    const titles = { dashboard:'ダッシュボード', holdings:'保有銘柄', dividends:'配当金', pnl:'損益分析', settings:'設定' };
+    document.getElementById('topbar-title').textContent = titles[page] ?? page;
+    this.renderPage();
+  },
+
+  renderPage() {
+    const fn = { dashboard: 'renderDashboard', holdings: 'renderHoldings', dividends: 'renderDividends', pnl: 'renderPnL', settings: 'renderSettings' }[this.page];
     if (fn) this[fn]();
   },
 
-  html(h) { document.getElementById('pageContent').innerHTML = h; },
+  /* ===== Sync badge ===== */
+  _updateSyncBadge() {
+    const el = document.getElementById('sync-badge');
+    if (!el) return;
+    el.className = 'sync-badge ' + (Sync.status === 'on' ? 'on' : 'off');
+    el.title = Sync.status === 'on' ? `同期中 (${Sync.user?.email ?? ''})` : 'オフライン';
+  },
 
-  /* ============================================================
-     DASHBOARD
-     ============================================================ */
-  renderDashboard() {
-    const buy  = this.trades.filter(t => t.side==='buy').reduce((s,t) => s+Math.abs(t.amount), 0);
-    const sell = this.trades.filter(t => t.side==='sell').reduce((s,t) => s+Math.abs(t.amount), 0);
-    const syms = new Set(this.trades.map(t => t.symbolCode||t.symbolName)).size;
-    const recent = [...this.trades].sort((a,b) => b.date.localeCompare(a.date)).slice(0,8);
-
-    this.html(`
-      <div class="kpi-grid">
-        <div class="kpi-card"><div class="kpi-label">取引件数</div><div class="kpi-value">${this.trades.length.toLocaleString()}</div><div class="kpi-sub">件</div></div>
-        <div class="kpi-card"><div class="kpi-label">銘柄数</div><div class="kpi-value">${syms}</div><div class="kpi-sub">銘柄</div></div>
-        <div class="kpi-card kpi-buy"><div class="kpi-label">買付総額</div><div class="kpi-value">${Utils.yen(buy)}</div><div class="kpi-sub">累計</div></div>
-        <div class="kpi-card kpi-sell"><div class="kpi-label">売却総額</div><div class="kpi-value">${Utils.yen(sell)}</div><div class="kpi-sub">累計</div></div>
-      </div>
-      <div class="dash-grid">
-        <div class="card">
-          <div class="card-header"><span class="card-title">直近の取引</span><button class="btn btn-sm btn-ghost" onclick="App.navigate('history')">すべて見る →</button></div>
-          <div>${recent.length ? recent.map(t => this._tradeRow(t)).join('') : this._empty('データなし','新規登録またはCSV取込でデータを追加してください')}</div>
-        </div>
-        <div class="card">
-          <div class="card-header"><span class="card-title">区分別 買付額</span></div>
-          <div class="card-body"><div class="chart-container"><canvas id="dashChart"></canvas></div></div>
-        </div>
-      </div>`);
-
-    if (this.trades.length) {
-      const byAcc = {};
-      this.trades.filter(t=>t.side==='buy').forEach(t => { byAcc[t.account]=(byAcc[t.account]??0)+Math.abs(t.amount); });
-      ChartMgr.doughnut('dashChart', Object.keys(byAcc), Object.values(byAcc));
+  /* ===== Quote fetch ===== */
+  async _fetchQuotes(codes, notify = true) {
+    if (!codes.length) return;
+    const btn = document.getElementById('btn-refresh');
+    btn?.classList.add('spinning');
+    try {
+      const result = await YahooFinance.getQuotes(codes);
+      Object.assign(this.quotes, result);
+      this.quoteTime = new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+      HoldingStorage.saveQuotes(this.quotes);
+      if (notify) Toast.show('株価を更新しました', 'success');
+    } catch {
+      if (notify) Toast.show('株価取得に失敗しました', 'error');
+    } finally {
+      btn?.classList.remove('spinning');
     }
   },
 
-  _tradeRow(t) {
-    return `<div class="trade-row">
-      <div><div class="trade-symbol">${this.esc(t.symbolName||t.symbolCode)}</div>
-        <div class="trade-meta">${Utils.fmtDate(t.date)} &ensp; ${this._accBadge(t.account)}</div></div>
-      <div><div class="trade-amount ${t.side==='buy'?'text-buy':'text-sell'}">${t.side==='buy'?'買':'売'} ${Utils.yen(t.amount)}</div>
-        <div class="trade-shares text-muted">${t.shares.toLocaleString()} 株</div></div>
+  async refreshQuotes() {
+    if (!this.holdings.length) return;
+    await this._fetchQuotes(this.holdings.map(h => h.code));
+    this.renderPage();
+  },
+
+  async _fetchDividends(codes) {
+    if (!codes.length) return;
+    try {
+      const result = await YahooFinance.getDividendsMany(codes);
+      Object.assign(this.dividends, result);
+      this.renderPage();
+    } catch { /* silent */ }
+  },
+
+  /* ===== Dashboard ===== */
+  renderDashboard() {
+    const enriched = Portfolio.calcAll(this.holdings, this.quotes);
+    const sum      = Portfolio.summary(enriched);
+    const annDiv   = this._annualDivEstimate();
+
+    const el = document.getElementById('page-area');
+    el.innerHTML = `
+      <div class="summary-grid">
+        ${this._summaryCard('総評価額', yen(sum.totalValue), `取得総額 ${yen(sum.totalCost)}`, '')}
+        ${this._summaryCard('評価損益', `<span class="${sc(sum.pnl)}">${sg(sum.pnl)}${yen(sum.pnl)}</span>`, `<span class="${sc(sum.pnl)}">${sg(sum.pnlPct)}${pct(sum.pnlPct)}</span>`, '')}
+        ${this._summaryCard('本日の変動', `<span class="${sc(sum.dayChg)}">${sg(sum.dayChg)}${yen(sum.dayChg)}</span>`, '前日比', '')}
+        ${this._summaryCard('年間配当見込み', yen(annDiv), '税引前・保有株数ベース', '')}
+      </div>
+
+      <div class="dash-mid">
+        <div class="card">
+          <div class="card-title">ポートフォリオ構成</div>
+          <div class="chart-wrap"><canvas id="chart-alloc"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+            保有銘柄
+            <span style="font-size:.75rem;color:var(--text-3);font-weight:400">${this.quoteTime ? `更新 ${this.quoteTime}` : 'データ未取得'}</span>
+          </div>
+          <div class="holdings-mini" id="dash-mini"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">銘柄別 評価損益</div>
+        <div style="height:220px"><canvas id="chart-pnl-bar"></canvas></div>
+      </div>
+    `;
+
+    if (!enriched.length) {
+      el.innerHTML = `
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/></svg>
+          <h3>まだ銘柄が登録されていません</h3>
+          <p>「+ 追加」から保有銘柄を登録してください</p>
+          <button class="btn-primary-lg" onclick="App.openModal()">銘柄を追加する</button>
+        </div>`;
+      return;
+    }
+
+    // Mini list
+    const miniEl = document.getElementById('dash-mini');
+    if (miniEl) {
+      miniEl.innerHTML = enriched.slice(0, 8).map(h => `
+        <div class="mini-row">
+          <div class="mini-info">
+            <span class="mini-code">${h.code}</span>
+            <span class="mini-name">${h.name}</span>
+          </div>
+          <div class="mini-pnl">
+            <div class="mini-pnl-val ${sc(h.pnl)}">${sg(h.pnl)}${yen(h.pnl)}</div>
+            <div class="mini-pnl-pct ${sc(h.pnlPct)}">${sg(h.pnlPct)}${pct(h.pnlPct)}</div>
+          </div>
+        </div>`).join('');
+    }
+
+    this._destroyChart('alloc');
+    this._destroyChart('pnl-bar');
+
+    // Allocation donut
+    const topH = enriched.sort((a, b) => b.value - a.value);
+    this._charts['alloc'] = new Chart(document.getElementById('chart-alloc'), {
+      type: 'doughnut',
+      data: {
+        labels: topH.map(h => h.name || h.code),
+        datasets: [{
+          data: topH.map(h => h.value),
+          backgroundColor: ['#2563eb','#16a34a','#dc2626','#d97706','#7c3aed','#0284c7','#db2777','#65a30d','#ea580c','#0891b2'],
+          borderWidth: 2, borderColor: '#fff',
+        }],
+      },
+      options: { responsive: true, maintainAspectRatio: true, plugins: { legend: { position: 'right', labels: { font: { size: 11 }, boxWidth: 12 } } }, cutout: '65%' },
+    });
+
+    // P&L bar
+    const sorted = [...enriched].sort((a, b) => b.pnl - a.pnl);
+    this._charts['pnl-bar'] = new Chart(document.getElementById('chart-pnl-bar'), {
+      type: 'bar',
+      data: {
+        labels: sorted.map(h => h.name || h.code),
+        datasets: [{
+          data: sorted.map(h => h.pnl),
+          backgroundColor: sorted.map(h => h.pnl >= 0 ? 'rgba(22,163,74,.75)' : 'rgba(220,38,38,.75)'),
+          borderRadius: 4,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { callback: v => yen(v), font: { size: 11 } }, grid: { color: '#f1f5f9' } },
+          y: { ticks: { font: { size: 11 } }, grid: { display: false } },
+        },
+      },
+    });
+  },
+
+  _summaryCard(title, value, sub, extra) {
+    return `<div class="card summary-card">
+      <div class="card-title">${title}</div>
+      <div class="card-value">${value}</div>
+      <div class="card-sub">${sub}</div>${extra}
     </div>`;
   },
 
-  /* ============================================================
-     PORTFOLIO — 保有銘柄 + リアルタイム株価
-     ============================================================ */
-  renderPortfolio() {
-    const holdings = Portfolio.getHoldings(this.trades);
-    if (!holdings.length) { this.html(`<div class="card"><div class="card-body">${this._empty('保有銘柄なし','取引を登録すると保有銘柄が表示されます')}</div></div>`); return; }
-
-    const fetching = this._fetching;
-    const NO_DATA  = `<span class="no-data-pill">${fetching ? '<span class="dot-loading"></span>取得中' : 'データ未取得'}</span>`;
-
-    const tbody = holdings.map(h => {
-      const q = this.quotes[h.symbolCode];
-      const priceTd   = q ? `<span class="fw7">${Utils.yen(q.price)}</span>` : NO_DATA;
-      const changeTd  = q ? `<span class="${q.changePct>=0?'change-pos':'change-neg'}">${q.changePct>=0?'▲':'▼'}${Math.abs(q.changePct).toFixed(2)}%</span>` : '';
-      const evalAmt   = q ? h.shares * q.price : null;
-      const evalPnl   = q ? evalAmt - h.totalCost : null;
-      const evalPct   = q && h.totalCost > 0 ? (evalPnl / h.totalCost) * 100 : null;
-      return `<tr>
-        <td><div class="stock-name">${this.esc(h.symbolName)}</div><div class="stock-code">${h.symbolCode}</div></td>
-        <td class="r">${h.shares.toLocaleString()}</td>
-        <td class="r">${Utils.yen(h.avgCost)}</td>
-        <td class="r"><div class="price-change">${priceTd}</div><div class="price-change">${changeTd}</div></td>
-        <td class="r">${evalAmt != null ? Utils.yen(evalAmt) : NO_DATA}</td>
-        <td class="r ${evalPnl==null?'':evalPnl>=0?'text-pos':'text-neg'}" style="font-weight:700">
-          ${evalPnl != null ? `${evalPnl>=0?'+':''}${Utils.yen(evalPnl)}<div style="font-size:.75rem;font-weight:500">(${evalPct>=0?'+':''}${evalPct?.toFixed(2)}%)</div>` : NO_DATA}
-        </td>
-        <td class="r">${Utils.yen(h.totalCost)}</td>
-      </tr>`;
-    }).join('');
-
-    const mobileCards = holdings.map(h => {
-      const q = this.quotes[h.symbolCode];
-      const evalPnl = q ? h.shares * q.price - h.totalCost : null;
-      return `<div class="port-card">
-        <div class="flex-between mb-4">
-          <div><div class="stock-name">${this.esc(h.symbolName)}</div><div class="stock-code text-muted">${h.symbolCode}</div></div>
-          <div style="text-align:right">
-            <div class="fw7">${q ? Utils.yen(q.price) : '—'}</div>
-            ${q ? `<div class="price-change ${q.changePct>=0?'change-pos':'change-neg'} text-xs">${q.changePct>=0?'▲':'▼'}${Math.abs(q.changePct).toFixed(2)}%</div>` : ''}
-          </div>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:.82rem">
-          <div><div class="text-muted text-xs">保有株数</div><div class="fw7">${h.shares.toLocaleString()}株</div></div>
-          <div><div class="text-muted text-xs">平均取得単価</div><div class="fw7">${Utils.yen(h.avgCost)}</div></div>
-          <div><div class="text-muted text-xs">評価損益</div><div class="fw7 ${evalPnl==null?'':evalPnl>=0?'text-pos':'text-neg'}">${evalPnl!=null?`${evalPnl>=0?'+':''}${Utils.yen(evalPnl)}`:'—'}</div></div>
-          <div><div class="text-muted text-xs">取得総額</div><div class="fw7">${Utils.yen(h.totalCost)}</div></div>
-        </div>
-      </div>`;
-    }).join('');
-
-    const totalCost = holdings.reduce((s,h) => s+h.totalCost, 0);
-    const totalEval = Object.keys(this.quotes).length ? holdings.reduce((s,h) => s+(this.quotes[h.symbolCode]?h.shares*this.quotes[h.symbolCode].price:h.totalCost), 0) : null;
-    const totalPnl  = totalEval != null ? totalEval - totalCost : null;
-
-    const hasQuotes    = Object.keys(this.quotes).length > 0;
-    const lastFetchTime = Object.values(this.quotes).map(q => q?.updatedAt).find(Boolean) ?? null;
-    const fetchBanner  = this._fetching
-      ? `<div class="fetch-banner fetch-banner-loading">
-           <span class="dot-loading"></span>
-           株価データを取得中です。しばらくお待ちください…
-         </div>`
-      : !hasQuotes
-      ? `<div class="fetch-banner fetch-banner-warn">
-           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-           株価がまだ取得されていません。
-           <button class="btn btn-sm btn-primary" style="margin-left:auto;flex-shrink:0" onclick="App._refreshQuotes()">今すぐ取得</button>
-         </div>`
-      : '';
-
-    this.html(`
-      ${fetchBanner}
-      <div class="kpi-grid" style="grid-template-columns:repeat(3,1fr)">
-        <div class="kpi-card"><div class="kpi-label">保有銘柄数</div><div class="kpi-value">${holdings.length}</div></div>
-        <div class="kpi-card"><div class="kpi-label">取得総額</div><div class="kpi-value">${Utils.yen(totalCost)}</div></div>
-        <div class="kpi-card ${totalPnl==null?'':totalPnl>=0?'kpi-pnl-pos':'kpi-pnl-neg'}">
-          <div class="kpi-label">評価損益合計</div>
-          <div class="kpi-value">${totalPnl!=null?`${totalPnl>=0?'+':''}${Utils.yen(totalPnl)}`:'—'}</div>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title">保有銘柄一覧</span>
-          <div style="display:flex;align-items:center;gap:12px">
-            ${lastFetchTime ? `<span style="font-size:.75rem;color:var(--c-text-3)">最終取得: ${lastFetchTime}</span>` : ''}
-            <button class="btn btn-sm btn-ghost" onclick="App._refreshQuotes()" id="refreshBtn">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
-              株価更新
-            </button>
-          </div>
-        </div>
-        <!-- PC table -->
-        <div class="portfolio-table-wrap">
-          <table class="portfolio-table">
-            <thead><tr>
-              <th>銘柄</th><th class="r">保有株数</th><th class="r">平均取得単価</th>
-              <th class="r">現在値 / 前日比</th><th class="r">評価額</th>
-              <th class="r">評価損益</th><th class="r">取得総額</th>
-            </tr></thead>
-            <tbody>${tbody}</tbody>
-          </table>
-        </div>
-        <!-- Mobile cards -->
-        <div class="port-cards" style="padding:14px">${mobileCards}</div>
-      </div>`);
-
-    // 分割情報を取得（全取引銘柄。売却済みの実現損益計算にも効く）
-    this._fetchSplits([...new Set(this.trades.map(t => t.symbolCode))]);
-    this._fetchQuotes(holdings);
-  },
-
-  async _fetchQuotes(holdings) {
-    const codes = holdings.filter(h => Portfolio.isValidCode(h.symbolCode)).map(h => h.symbolCode);
-    if (!codes.length) return;
-    this._fetching = true;
-    if (this.page === 'portfolio') this.renderPortfolio();
-    await YahooFinance.getQuotes(codes, (done, total) => {
-      const btn = document.getElementById('refreshBtn');
-      if (btn) btn.textContent = `取得中… ${done}/${total}`;
-    }).then(quotes => {
-      // 取得できたものだけ反映（失敗分は前回値を保持）
-      Object.entries(quotes).forEach(([code, q]) => { if (q) this.quotes[code] = q; });
-      this._saveQuoteCache();
-    }).catch(() => Toast.show('株価の取得に失敗しました', 'error'))
-      .finally(() => {
-        this._fetching = false;
-        if (this.page === 'portfolio') this.renderPortfolio();
-      });
-  },
-
-  // 前回取得した株価を端末に保存／復元（開いた瞬間に前回値を表示するため）
-  QUOTE_KEY: 'kabu_quote_cache_v1',
-  _saveQuoteCache() {
-    try { localStorage.setItem(this.QUOTE_KEY, JSON.stringify(this.quotes)); } catch {}
-  },
-  _loadQuoteCache() {
-    try { return JSON.parse(localStorage.getItem(this.QUOTE_KEY) ?? '{}') || {}; } catch { return {}; }
-  },
-
-  // 株式分割：キャッシュ済みの分割情報をPortfolioへ反映
-  splitData: {},
-  _loadSplits() {
-    const codes = [...new Set(this.trades.map(t => t.symbolCode).filter(c => Portfolio.isValidCode(c)))];
-    codes.forEach(c => { const s = YahooFinance.getSplitsCached(c); if (s) this.splitData[c] = s; });
-    Portfolio.setSplits(this.splitData);
-  },
-  // 未取得の分割を裏で取得 → 反映して再描画
-  _fetchSplits(codes) {
-    const missing = codes.filter(c => Portfolio.isValidCode(c) && !this.splitData[c]);
-    if (!missing.length) return;
-    YahooFinance.getSplitsMany(missing).then(res => {
-      Object.assign(this.splitData, res);
-      Portfolio.setSplits(this.splitData);
-      if (this.page === 'portfolio') this.renderPortfolio();
-      else if (this.page === 'dividends') this._renderDividendUI(Portfolio.getHoldings(this.trades));
-    }).catch(() => {});
-  },
-
-  async _refreshQuotes() {
-    YahooFinance.clearMemCache();   // 株価のみ強制再取得（配当キャッシュは温存）
-    this.renderPortfolio();         // 前回値を表示したまま裏で最新取得
-  },
-
-  /* ============================================================
-     DIVIDENDS — 配当管理
-     ============================================================ */
-  async renderDividends() {
-    const holdings = Portfolio.getHoldings(this.trades);
-    const validHoldings = holdings.filter(h => Portfolio.isValidCode(h.symbolCode));
-    const codes = validHoldings.map(h => h.symbolCode);
-
-    // ① まずキャッシュで即描画（ネット待ちしない）
-    codes.forEach(c => { if (!this.divData[c]) { const d = YahooFinance.getDividendsCached(c); if (d) this.divData[c] = d; } });
-    this._renderDividendUI(holdings);
-
-    // ② 未取得の配当だけ裏で並列取得 → 取れたら静かに再描画
-    const missing = codes.filter(c => !this.divData[c]);
-    if (missing.length) {
-      this._setDivLoading(true);
-      YahooFinance.getDividendsMany(missing).then(res => {
-        Object.assign(this.divData, res);
-        this._setDivLoading(false);
-        if (this.page === 'dividends') this._renderDividendUI(Portfolio.getHoldings(this.trades));
-      }).catch(() => this._setDivLoading(false));
-    }
-
-    // ③ 株価は保有ページのキャッシュを流用。無ければ裏で取得
-    if (codes.some(c => !this.quotes[c])) {
-      YahooFinance.getQuotes(codes).then(q => {
-        Object.entries(q).forEach(([c, v]) => { if (v) this.quotes[c] = v; });
-        this._saveQuoteCache();
-        if (this.page === 'dividends') this._renderDividendUI(Portfolio.getHoldings(this.trades));
-      }).catch(() => {});
-    }
-  },
-
-  _setDivLoading(on) {
-    const el = document.getElementById('divLoadingBadge');
-    if (el) el.style.display = on ? 'inline-flex' : 'none';
-  },
-
-  _renderDividendUI(holdings) {
-    const year = this.divYear;
-    const tax  = this.divTax;
-
-    // 全銘柄の受取配当を計算
-    let allRecs = [];
-    holdings.forEach(h => {
-      const code = h.symbolCode || h.symbolName;
-      const divHistory = this.divData[code] ?? [];
-      const recs = Portfolio.calcDividendsReceived(this.trades, code, divHistory);
-      recs.forEach(r => { r.symbolName = h.symbolName; r.symbolCode = h.symbolCode; r.avgCost = h.avgCost; });
-      allRecs = allRecs.concat(recs);
+  _annualDivEstimate() {
+    const year = new Date().getFullYear();
+    let total = 0;
+    this.holdings.forEach(h => {
+      const divs = this.dividends[h.code] ?? [];
+      const recent = divs.filter(d => d.date >= `${year - 1}-01-01`);
+      if (!recent.length) return;
+      const perShare = recent.reduce((s, d) => s + d.amount, 0);
+      total += perShare * h.shares;
     });
-
-    const yearRecs = allRecs.filter(r => r.year === String(year));
-    const total    = yearRecs.reduce((s,r) => s+(tax==='before'?r.gross:r.net), 0);
-
-    // 月別集計（12ヶ月）
-    const months = Array.from({length:12}, (_,i) => `${year}-${String(i+1).padStart(2,'0')}`);
-    const monthlyMap = {};
-    months.forEach(m => { monthlyMap[m] = 0; });
-    yearRecs.forEach(r => { if (monthlyMap[r.month] !== undefined) monthlyMap[r.month] += tax==='before'?r.gross:r.net; });
-    const monthlyData = months.map(m => monthlyMap[m]);
-    const monthLabels = months.map(m => `${parseInt(m.slice(5))}月`);
-
-    // 銘柄別集計
-    const bySymbol = {};
-    yearRecs.forEach(r => {
-      const k = r.symbolCode||r.symbolName;
-      if (!bySymbol[k]) bySymbol[k] = { name:r.symbolName, code:r.symbolCode, gross:0, net:0, count:0, avgCost:r.avgCost };
-      bySymbol[k].gross += r.gross;
-      bySymbol[k].net   += r.net;
-      bySymbol[k].count++;
-    });
-
-    // 利回り計算
-    const annualDivByCode = {};
-    holdings.forEach(h => {
-      const code = h.symbolCode;
-      if (!Portfolio.isValidCode(code)) return;
-      const divHistory = this.divData[code] ?? [];
-      annualDivByCode[code] = Portfolio.annualDivPerShare(divHistory);
-    });
-
-    const yieldRows = holdings.filter(h => Portfolio.isValidCode(h.symbolCode) && annualDivByCode[h.symbolCode] > 0)
-      .map(h => {
-        const annDiv  = annualDivByCode[h.symbolCode];
-        const yldCost = h.avgCost > 0 ? (annDiv / h.avgCost) * 100 : null;
-        const q       = this.quotes[h.symbolCode];
-        const yldNow  = q?.price > 0 ? (annDiv / q.price) * 100 : null;
-        const yld     = this.divYieldMode === 'cost' ? yldCost : yldNow;
-        return { h, annDiv, yldCost, yldNow, yld };
-      });
-
-    // 年リスト：直近6年＋実際に記録のある年を常に選べるように
-    const nowY = new Date().getFullYear();
-    const yearSet = new Set(allRecs.map(r => r.year));
-    for (let y = nowY; y >= nowY - 5; y--) yearSet.add(String(y));
-    yearSet.add(String(year));
-    const years = [...yearSet].sort().reverse();
-    const yearOpts = years.map(y => `<option value="${y}" ${y==year?'selected':''}>${y}年</option>`).join('');
-
-    // 表行
-    const tableRows = Object.values(bySymbol).sort((a,b) => b.net-a.net).map(s => {
-      const code    = s.code;
-      const annDiv  = annualDivByCode[code] ?? 0;
-      const q       = this.quotes[code];
-      const yldCost = s.avgCost>0 ? (annDiv/s.avgCost)*100 : null;
-      const yldNow  = q?.price>0  ? (annDiv/q.price)*100   : null;
-      const yld     = this.divYieldMode==='cost' ? yldCost : yldNow;
-      return `<tr>
-        <td><div class="fw7">${this.esc(s.name)}</div><div class="text-xs text-muted">${s.code}</div></td>
-        <td class="r">${s.count}回</td>
-        <td class="r">${Utils.yen(s.gross)}</td>
-        <td class="r fw7">${Utils.yen(tax==='before'?s.gross:s.net)}</td>
-        <td class="r">${yld!=null?`<span class="yield-pill ${yld<2?'warn':''}">${yld.toFixed(2)}%</span>`:'—'}</td>
-      </tr>`;
-    }).join('');
-
-    // Mobile cards
-    const divCards = Object.values(bySymbol).sort((a,b) => b.net-a.net).map(s => {
-      const val = tax==='before'?s.gross:s.net;
-      return `<div class="div-card flex-between">
-        <div><div class="fw7">${this.esc(s.name)}</div><div class="text-xs text-muted">${s.code} &middot; ${s.count}回</div></div>
-        <div style="text-align:right"><div class="fw7 text-pos">${Utils.yen(val)}</div><div class="text-xs text-muted">${tax==='before'?'税引前':'税引後'}</div></div>
-      </div>`;
-    }).join('');
-
-    this.html(`
-      <div class="div-header">
-        <div class="div-kpi-main">
-          <div class="div-kpi-label">年間受取配当（${year}年）
-            <span id="divLoadingBadge" style="display:none;align-items:center;gap:4px;margin-left:6px;font-size:.7rem"><span class="dot-loading"></span>更新中</span>
-          </div>
-          <div class="div-kpi-amount">${Utils.yen(total)}</div>
-          <div class="div-kpi-sub">${tax==='before'?'税引前':'税引後（20.315%控除）'} &ensp; ${yearRecs.length}回受取</div>
-        </div>
-        <div class="div-controls">
-          <div class="flex gap-2" style="flex-wrap:wrap">
-            <select onchange="App.divYear=+this.value;App._renderDividendUI(${JSON.stringify(Portfolio.getHoldings(this.trades))})" style="padding:7px 28px 7px 12px;border:1.5px solid var(--c-border);border-radius:var(--r-md);background:var(--c-surface);font-size:.875rem;font-weight:600;cursor:pointer;background-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\");background-repeat:no-repeat;background-position:right 8px center;background-size:15px;-webkit-appearance:none">
-              ${yearOpts}
-            </select>
-          </div>
-          <div class="seg-ctrl">
-            <button class="seg-btn ${tax==='before'?'active':''}" onclick="App.divTax='before';App._renderDividendUI(${JSON.stringify(Portfolio.getHoldings(this.trades))})">税引前</button>
-            <button class="seg-btn ${tax==='after'?'active':''}" onclick="App.divTax='after';App._renderDividendUI(${JSON.stringify(Portfolio.getHoldings(this.trades))})">税引後</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="div-grid">
-        <div class="card">
-          <div class="card-header"><span class="card-title">月別受取配当</span></div>
-          <div class="card-body"><div class="div-chart-tall"><canvas id="divMonthChart"></canvas></div></div>
-        </div>
-        <div class="card">
-          <div class="card-header"><span class="card-title">銘柄別 配当割合</span></div>
-          <div class="card-body"><div class="div-chart-tall"><canvas id="divPieChart"></canvas></div></div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title">銘柄別 配当詳細</span>
-          <div class="seg-ctrl">
-            <button class="seg-btn ${this.divYieldMode==='cost'?'active':''}" onclick="App.divYieldMode='cost';App._renderDividendUI(${JSON.stringify(Portfolio.getHoldings(this.trades))})">取得利回り</button>
-            <button class="seg-btn ${this.divYieldMode==='current'?'active':''}" onclick="App.divYieldMode='current';App._renderDividendUI(${JSON.stringify(Portfolio.getHoldings(this.trades))})">現在利回り</button>
-          </div>
-        </div>
-        ${tableRows ? `<div class="div-table-wrap"><table class="div-table">
-          <thead><tr><th>銘柄</th><th class="r">受取回数</th><th class="r">税引前合計</th><th class="r">${tax==='before'?'税引前':'税引後'}受取額</th><th class="r">配当利回り</th></tr></thead>
-          <tbody>${tableRows}</tbody>
-        </table></div>` : this._empty('このアカウントに配当データなし', '銘柄コードが正しく登録されているか確認してください')}
-        <div class="div-cards">${divCards || this._empty('配当データなし','')}</div>
-      </div>
-
-      <div class="card mt-4">
-        <div class="card-header"><span class="card-title">保有銘柄 配当利回り一覧</span>
-          <div class="seg-ctrl">
-            <button class="seg-btn ${this.divYieldMode==='cost'?'active':''}" onclick="App.divYieldMode='cost';App._renderDividendUI(${JSON.stringify(Portfolio.getHoldings(this.trades))})">取得利回り</button>
-            <button class="seg-btn ${this.divYieldMode==='current'?'active':''}" onclick="App.divYieldMode='current';App._renderDividendUI(${JSON.stringify(Portfolio.getHoldings(this.trades))})">現在利回り</button>
-          </div>
-        </div>
-        <div class="div-table-wrap"><table class="div-table">
-          <thead><tr><th>銘柄</th><th class="r">年間配当/株</th><th class="r">平均取得単価</th><th class="r">現在株価</th><th class="r">配当利回り</th></tr></thead>
-          <tbody>${yieldRows.map(({h,annDiv,yldCost,yldNow,yld}) => `<tr>
-            <td><div class="fw7">${this.esc(h.symbolName)}</div><div class="text-xs text-muted">${h.symbolCode}</div></td>
-            <td class="r">${Utils.yen(annDiv)}</td>
-            <td class="r">${Utils.yen(h.avgCost)}</td>
-            <td class="r">${this.quotes[h.symbolCode]?Utils.yen(this.quotes[h.symbolCode].price):'—'}</td>
-            <td class="r"><span class="yield-pill ${(yld??0)<2?'warn':''}">${yld!=null?yld.toFixed(2)+'%':'—'}</span><div class="text-xs text-muted" style="margin-top:3px">${this.divYieldMode==='cost'?'取得':'現在'}</div></td>
-          </tr>`).join('') || '<tr><td colspan="5" class="text-muted" style="text-align:center;padding:20px">データなし</td></tr>'}
-          </tbody>
-        </table></div>
-      </div>`);
-
-    // Chart
-    ChartMgr.monthlyDiv('divMonthChart', monthLabels, monthlyData);
-    const symNames = Object.values(bySymbol).map(s=>s.name);
-    const symVals  = Object.values(bySymbol).map(s=>tax==='before'?s.gross:s.net);
-    if (symNames.length) ChartMgr.doughnut('divPieChart', symNames, symVals);
+    return total;
   },
 
-  /* ============================================================
-     ANNUAL SUMMARY — 年度別損益
-     ============================================================ */
-  renderAnnual() {
-    const pnlData = Portfolio.getRealizedPnL(this.trades);
-    const years   = Object.keys(pnlData).sort().reverse();
-    if (!years.length) { this.html(`<div class="card"><div class="card-body">${this._empty('損益データなし','売却取引を登録すると実現損益が表示されます')}</div></div>`); return; }
+  /* ===== Holdings ===== */
+  renderHoldings() {
+    const enriched = Portfolio.calcAll(this.holdings, this.quotes);
+    const filters  = { all: '全て', 特定: '特定', NISA: 'NISA', 一般: '一般' };
+    const filtered = this.holdFilter === 'all' ? enriched : enriched.filter(h => h.account === this.holdFilter);
 
-    const year    = String(this.annualYear);
-    const yr      = pnlData[year] ?? { realized:0, buyAmt:0, sellAmt:0, taxEst:0 };
-    const yearOpts = years.map(y => `<option value="${y}" ${y===year?'selected':''}>${y}年</option>`).join('');
-
-    // 配当（divDataがあれば）
-    const holdings = Portfolio.getHoldings(this.trades);
-    let totalDiv = 0;
-    holdings.forEach(h => {
-      const divHistory = this.divData[h.symbolCode||h.symbolName] ?? [];
-      const recs = Portfolio.calcDividendsReceived(this.trades, h.symbolCode||h.symbolName, divHistory)
-        .filter(r => r.year === year);
-      totalDiv += recs.reduce((s,r) => s+r.net, 0);
-    });
-
-    // 年別グラフ用
-    const allYears = Object.keys(pnlData).sort();
-    const barData  = allYears.map(y => pnlData[y].realized);
-
-    this.html(`
-      <div class="summary-year-selector">
-        <select onchange="App.annualYear=+this.value;App.renderAnnual()">${yearOpts}</select>
-        <span class="text-muted text-sm">${year}年 損益レポート</span>
+    const el = document.getElementById('page-area');
+    el.innerHTML = `
+      <div class="page-hdr">
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <h2>保有銘柄 (${this.holdings.length}件)</h2>
+          <div class="filter-tabs">
+            ${Object.entries(filters).map(([k, v]) =>
+              `<button class="filter-tab ${this.holdFilter === k ? 'active' : ''}" onclick="App.setHoldFilter('${k}')">${v}</button>`
+            ).join('')}
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn-ghost" onclick="App.triggerCsvImport()" style="display:flex;align-items:center;gap:6px;font-size:.8125rem;padding:7px 14px">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            CSV取込
+          </button>
+          <button class="btn-primary-sm" onclick="App.openModal()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            銘柄追加
+          </button>
+        </div>
       </div>
 
-      <div class="annual-grid">
-        <div style="display:flex;flex-direction:column;gap:16px">
-          <div class="card">
-            <div class="card-header"><span class="card-title">実現損益</span></div>
-            <div class="card-body">
-              <div class="total-row mb-4">
-                <div class="total-label">実現損益合計</div>
-                <div class="total-value ${yr.realized>=0?'text-pos':'text-neg'}">${yr.realized>=0?'+':''}${Utils.yen(yr.realized)}</div>
-              </div>
-              <div class="pnl-row"><span class="pnl-label">売却総額</span><span class="pnl-value">${Utils.yen(yr.sellAmt)}</span></div>
-              <div class="pnl-row"><span class="pnl-label">買付総額</span><span class="pnl-value">${Utils.yen(yr.buyAmt)}</span></div>
-              <div class="pnl-row"><span class="pnl-label">税額概算（20.315%）</span><span class="pnl-value text-neg">${yr.realized>0?'▲'+Utils.yen(yr.taxEst):'—'}</span></div>
-              <div class="pnl-row"><span class="pnl-label">税引後 実現益</span><span class="pnl-value ${yr.realized>=0?'text-pos':'text-neg'}">${Utils.yen(yr.realized - (yr.taxEst??0))}</span></div>
-            </div>
-          </div>
+      ${!filtered.length ? `<div class="empty-state">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/></svg>
+        <h3>銘柄がありません</h3><p>「+ 追加」から登録してください</p>
+        <button class="btn-primary-lg" onclick="App.openModal()">銘柄を追加する</button>
+      </div>` : ''}
 
-          ${totalDiv > 0 ? `<div class="card">
-            <div class="card-header"><span class="card-title">配当収入</span></div>
-            <div class="card-body">
-              <div class="total-row">
-                <div class="total-label">年間受取配当（税引後）</div>
-                <div class="total-value text-pos">${Utils.yen(totalDiv)}</div>
-              </div>
-            </div>
-          </div>` : ''}
-
-          <div class="card">
-            <div class="card-header"><span class="card-title">年間収益合計</span></div>
-            <div class="card-body">
-              <div class="total-row">
-                <div class="total-label">実現益 ＋ 配当（税引後）</div>
-                <div class="total-value ${(yr.realized-yr.taxEst+totalDiv)>=0?'text-pos':'text-neg'}">${Utils.yen(yr.realized-(yr.taxEst??0)+totalDiv)}</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-header"><span class="card-title">年別 実現損益推移</span></div>
-          <div class="card-body"><div style="position:relative;height:320px"><canvas id="annualChart"></canvas></div></div>
-        </div>
-      </div>`);
-
-    ChartMgr.bar('annualChart', allYears.map(y=>y+'年'),
-      [{ label:'実現損益', data: barData, backgroundColor: barData.map(v=>v>=0?'#86efac':'#fca5a5'), borderRadius:4 }],
-      v => (v>=0?'+':'')+Utils.yen(v));
-  },
-
-  /* ============================================================
-     HISTORY
-     ============================================================ */
-  renderHistory() {
-    this.html(`
-      <div class="card">
-        <div class="filter-bar">
-          <input class="filter-input" id="fq" type="search" placeholder="🔍 銘柄名・コード" value="${this.esc(this.hFilters.q)}" style="flex:1;min-width:140px">
-          <select class="filter-select" id="fAcc">
-            <option value="">すべての区分</option>
-            ${['特定','一般','NISA','新NISA成長','新NISA積立'].map(v=>`<option value="${v}">${v}</option>`).join('')}
-          </select>
-          <select class="filter-select" id="fSide">
-            <option value="">売買すべて</option>
-            <option value="buy">買付</option>
-            <option value="sell">売却</option>
-          </select>
-          <span class="text-muted text-sm" id="hCount" style="align-self:center;white-space:nowrap"></span>
-        </div>
-        <div class="data-table-wrap"><table class="data-table" id="hTable">
+      <!-- PC Table -->
+      ${filtered.length ? `
+      <div class="table-wrap">
+        <table>
           <thead><tr>
-            ${['date','symbolName','account','side','shares','price','amount'].map(k=>this._th(k)).join('')}
-            <th>操作</th>
+            <th>銘柄</th>
+            <th class="num">株数</th>
+            <th class="num">取得単価</th>
+            <th class="num">現在値</th>
+            <th class="num">評価額</th>
+            <th class="num">評価損益</th>
+            <th class="num">前日比</th>
+            <th>口座</th>
+            <th></th>
           </tr></thead>
-          <tbody id="hTbody"></tbody>
-        </table></div>
-        <div class="trade-cards" id="hCards"></div>
-        <div id="hEmpty" style="display:none">${this._empty('該当なし','条件を変更してください')}</div>
-      </div>`);
-
-    document.getElementById('fAcc').value  = this.hFilters.account;
-    document.getElementById('fSide').value = this.hFilters.side;
-    this._bindHistory();
-    this._refreshHistory();
-  },
-
-  _TH_LABELS: { date:'日付', symbolName:'銘柄', account:'区分', side:'売買', shares:'株数', price:'単価', amount:'受渡金額' },
-  _TH_R:      new Set(['shares','price','amount']),
-  _th(key) {
-    const sorted = this.sortKey === key;
-    return `<th class="${sorted?'sorted':''}" data-sort="${key}" style="${this._TH_R.has(key)?'text-align:right':''}">
-      ${this._TH_LABELS[key]} <span class="sort-icon">${sorted?(this.sortDir===1?'↑':'↓'):'↕'}</span></th>`;
-  },
-
-  _bindHistory() {
-    const upd = () => {
-      this.hFilters.q       = document.getElementById('fq')?.value ?? '';
-      this.hFilters.account = document.getElementById('fAcc')?.value ?? '';
-      this.hFilters.side    = document.getElementById('fSide')?.value ?? '';
-      this._refreshHistory();
-    };
-    document.getElementById('fq')?.addEventListener('input', upd);
-    document.getElementById('fAcc')?.addEventListener('change', upd);
-    document.getElementById('fSide')?.addEventListener('change', upd);
-    document.getElementById('hTable')?.querySelectorAll('th[data-sort]').forEach(th => {
-      th.addEventListener('click', () => {
-        this.sortKey === th.dataset.sort ? (this.sortDir *= -1) : (this.sortKey = th.dataset.sort, this.sortDir = -1);
-        this.renderHistory();
-      });
-    });
-  },
-
-  _filteredTrades() {
-    const { q, account, side } = this.hFilters;
-    return this.trades
-      .filter(t => {
-        if (q && !((t.symbolName??'').includes(q)||(t.symbolCode??'').includes(q))) return false;
-        if (account && t.account !== account) return false;
-        if (side    && t.side    !== side)    return false;
-        return true;
-      })
-      .sort((a,b) => {
-        const av = a[this.sortKey]??'', bv = b[this.sortKey]??'';
-        return typeof av === 'number' ? (av-bv)*this.sortDir : String(av).localeCompare(String(bv),'ja')*this.sortDir;
-      });
-  },
-
-  _refreshHistory() {
-    const rows = this._filteredTrades();
-    document.getElementById('hCount').textContent = `${rows.length} 件`;
-    document.getElementById('hEmpty').style.display = rows.length ? 'none' : 'block';
-    const tbody = document.getElementById('hTbody');
-    if (tbody) tbody.innerHTML = rows.map(t => `<tr>
-      <td>${Utils.fmtDate(t.date)}</td>
-      <td><div class="fw7" style="font-size:.875rem">${this.esc(t.symbolName)}</div><div class="text-xs text-muted">${this.esc(t.symbolCode??'')}</div></td>
-      <td>${this._accBadge(t.account)}</td>
-      <td><span class="badge ${t.side==='buy'?'badge-buy':'badge-sell'}">${t.side==='buy'?'買付':'売却'}</span></td>
-      <td class="col-r">${t.shares.toLocaleString()}</td>
-      <td class="col-r">${t.price?Utils.yen(t.price):'—'}</td>
-      <td class="col-r fw7">${Utils.yen(t.amount)}</td>
-      <td><div class="flex gap-2">
-        <button class="btn-icon" title="編集" onclick="App.openModal('${t.id}')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-        </button>
-        <button class="btn-icon" title="削除" style="color:#ef4444" onclick="App.deleteTrade('${t.id}')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
-        </button>
-      </div></td>
-    </tr>`).join('');
-    const cards = document.getElementById('hCards');
-    if (cards) cards.innerHTML = rows.map(t => `<div class="trade-card-item">
-      <div style="flex:1"><div class="fw7" style="font-size:.875rem">${this.esc(t.symbolName)} <span class="text-xs text-muted">${this.esc(t.symbolCode??'')}</span></div>
-        <div class="text-xs text-muted mt-1">${Utils.fmtDate(t.date)} &ensp; ${this._accBadge(t.account)}</div>
-        ${t.note?`<div class="text-xs text-muted">${this.esc(t.note)}</div>`:''}
+          <tbody>
+            ${filtered.map(h => `
+              <tr>
+                <td>
+                  <div style="font-size:.75rem;color:var(--text-3)">${h.code}</div>
+                  <div style="font-weight:600">${h.name}</div>
+                  ${h.memo ? `<div style="font-size:.75rem;color:var(--text-3)">${h.memo}</div>` : ''}
+                </td>
+                <td class="num">${num(h.shares)}</td>
+                <td class="num">${yen(h.avgCost, 1)}</td>
+                <td class="num">${h.price !== h.avgCost ? yen(h.price, 1) : '<span style="color:var(--text-3)">未取得</span>'}</td>
+                <td class="num">${yen(h.value)}</td>
+                <td class="num">
+                  <span class="${sc(h.pnl)}" style="font-weight:700">${sg(h.pnl)}${yen(h.pnl)}</span>
+                  <div class="${sc(h.pnlPct)}" style="font-size:.75rem">${sg(h.pnlPct)}${pct(h.pnlPct)}</div>
+                </td>
+                <td class="num">
+                  <span class="${sc(h.dayChg)}">${sg(h.dayChg)}${yen(h.dayChg)}</span>
+                  <div class="${sc(h.dayChgPct)}" style="font-size:.75rem">${sg(h.dayChgPct)}${pct(h.dayChgPct)}</div>
+                </td>
+                <td><span class="account-badge ${h.account}">${h.account}</span></td>
+                <td>
+                  <button class="action-btn" onclick="App.openModal('${h.id}')" title="編集">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                  </button>
+                  <button class="action-btn del" onclick="App.deleteHolding('${h.id}')" title="削除">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
+                  </button>
+                </td>
+              </tr>`).join('')}
+          </tbody>
+          <tfoot><tr class="tfoot-row">
+            <td colspan="4">合計</td>
+            <td class="num">${yen(filtered.reduce((s,h) => s+h.value, 0))}</td>
+            <td class="num"><span class="${sc(filtered.reduce((s,h)=>s+h.pnl,0))}">${sg(filtered.reduce((s,h)=>s+h.pnl,0))}${yen(filtered.reduce((s,h)=>s+h.pnl,0))}</span></td>
+            <td class="num"><span class="${sc(filtered.reduce((s,h)=>s+h.dayChg,0))}">${sg(filtered.reduce((s,h)=>s+h.dayChg,0))}${yen(filtered.reduce((s,h)=>s+h.dayChg,0))}</span></td>
+            <td colspan="2"></td>
+          </tr></tfoot>
+        </table>
       </div>
-      <div style="text-align:right;flex-shrink:0">
-        <div class="fw7 ${t.side==='buy'?'text-buy':'text-sell'}">${t.side==='buy'?'買':'売'} ${Utils.yen(t.amount)}</div>
-        <div class="text-xs text-muted">${t.shares.toLocaleString()} 株</div>
-        <div class="flex gap-2" style="margin-top:8px;justify-content:flex-end">
-          <button class="btn btn-sm btn-ghost" onclick="App.openModal('${t.id}')">編集</button>
-          <button class="btn btn-sm" style="color:#ef4444;border:1px solid #fca5a5" onclick="App.deleteTrade('${t.id}')">削除</button>
-        </div>
-      </div>
-    </div>`).join('');
-  },
 
-  deleteTrade(id) {
-    if (!confirm('この取引を削除しますか？')) return;
-    this.trades = this.trades.filter(t => t.id !== id);
-    TradeStorage.save(this.trades);
-    Toast.show('取引を削除しました','info');
-    this._refreshHistory();
-  },
-
-  /* ============================================================
-     CHARTS
-     ============================================================ */
-  renderCharts() {
-    if (!this.trades.length) { this.html(`<div class="card"><div class="card-body">${this._empty('データなし','取引を追加してください')}</div></div>`); return; }
-    this.html(`
-      <div class="charts-grid">
-        <div class="card"><div class="card-header"><span class="card-title">区分別 買付額</span></div><div class="card-body"><div class="chart-tall"><canvas id="c1"></canvas></div></div></div>
-        <div class="card"><div class="card-header"><span class="card-title">月別 買付/売却</span></div><div class="card-body"><div class="chart-tall"><canvas id="c2"></canvas></div></div></div>
-        <div class="card"><div class="card-header"><span class="card-title">銘柄別 買付額 Top10</span></div><div class="card-body"><div class="chart-tall"><canvas id="c3"></canvas></div></div></div>
-        <div class="card"><div class="card-header"><span class="card-title">累計投資額の推移</span></div><div class="card-body"><div class="chart-tall"><canvas id="c4"></canvas></div></div></div>
-      </div>`);
-    const byAcc={};
-    this.trades.filter(t=>t.side==='buy').forEach(t=>{byAcc[t.account]=(byAcc[t.account]??0)+Math.abs(t.amount);});
-    ChartMgr.doughnut('c1',Object.keys(byAcc),Object.values(byAcc));
-    const byM={};
-    this.trades.forEach(t=>{const m=t.date.slice(0,7);if(!byM[m])byM[m]={buy:0,sell:0};if(t.side==='buy')byM[m].buy+=Math.abs(t.amount);else byM[m].sell+=Math.abs(t.amount);});
-    const ms=Object.keys(byM).sort();
-    ChartMgr.bar('c2',ms.map(m=>m.slice(2)),[{label:'買付',data:ms.map(m=>byM[m].buy),backgroundColor:'#fca5a5',borderRadius:4},{label:'売却',data:ms.map(m=>byM[m].sell),backgroundColor:'#86efac',borderRadius:4}]);
-    const bySym={};
-    this.trades.filter(t=>t.side==='buy').forEach(t=>{const k=t.symbolName||t.symbolCode;bySym[k]=(bySym[k]??0)+Math.abs(t.amount);});
-    const sorted=Object.entries(bySym).sort((a,b)=>b[1]-a[1]).slice(0,10);
-    ChartMgr.make('c3',{type:'bar',data:{labels:sorted.map(([k])=>k),datasets:[{label:'買付額',data:sorted.map(([,v])=>v),backgroundColor:ChartMgr.P,borderRadius:4}]},options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{callback:v=>Utils.yen(v)},grid:{color:'#f1f5f9'}},y:{grid:{display:false}}}}});
-    let cum=0;const pts=[...this.trades].sort((a,b)=>a.date.localeCompare(b.date)).map(t=>{cum+=t.side==='buy'?Math.abs(t.amount):-Math.abs(t.amount);return cum;});
-    const dl=[...this.trades].sort((a,b)=>a.date.localeCompare(b.date)).map(t=>Utils.fmtDate(t.date));
-    ChartMgr.line('c4',dl,pts,'累計投資額');
-  },
-
-  /* ============================================================
-     IMPORT
-     ============================================================ */
-  renderImport() {
-    this.html(`
-      <div class="import-grid">
-        <div class="card">
-          <div class="card-header"><span class="card-title">CSVファイル取込</span></div>
-          <div class="card-body" style="display:flex;flex-direction:column;gap:14px">
-            <div style="display:flex;gap:12px;flex-wrap:wrap">
-              <div style="flex:1;min-width:140px"><label class="form-label" style="margin-bottom:5px;display:block">証券会社</label>
-                <select class="form-select" id="brokerSel"><option value="auto">自動判定（推奨）</option><option value="SBI">SBI証券</option><option value="Rakuten">楽天証券</option><option value="Matsui">松井証券</option><option value="Monex">マネックス証券</option></select></div>
-              <div style="flex:1;min-width:140px"><label class="form-label" style="margin-bottom:5px;display:block">取込モード</label>
-                <select class="form-select" id="importMode">
-                  <option value="append">追加（重複はスキップ）</option>
-                  <option value="replace-source">この証券会社のデータだけ入替（推奨）</option>
-                  <option value="replace">全データを上書き（全削除して入替）</option>
-                </select></div>
+      <!-- Mobile Cards -->
+      <div class="holdings-cards">
+        ${filtered.map(h => `
+          <div class="holding-card">
+            <div class="hc-top">
+              <div class="hc-info">
+                <div class="hc-code">${h.code} <span class="account-badge ${h.account}">${h.account}</span></div>
+                <div class="hc-name">${h.name}</div>
+                ${h.memo ? `<div style="font-size:.75rem;color:var(--text-3);margin-top:2px">${h.memo}</div>` : ''}
+              </div>
+              <div class="hc-pnl">
+                <div class="hc-pnl-val ${sc(h.pnl)}">${sg(h.pnl)}${yen(h.pnl)}</div>
+                <div class="hc-pnl-pct ${sc(h.pnlPct)}">${sg(h.pnlPct)}${pct(h.pnlPct)}</div>
+              </div>
             </div>
-            <div class="dropzone" id="dz">
-              <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-              <p style="font-weight:600;color:var(--c-text-2)">クリック / ドラッグ&amp;ドロップ</p>
-              <p class="text-sm text-muted" style="margin-top:4px">CSV（Shift-JIS / UTF-8）複数可</p>
-              <input type="file" id="csvFile" accept=".csv" multiple>
+            <div class="hc-grid">
+              <div class="hc-stat"><div class="hc-label">株数</div><div class="hc-value">${num(h.shares)}</div></div>
+              <div class="hc-stat"><div class="hc-label">取得単価</div><div class="hc-value">${yen(h.avgCost,1)}</div></div>
+              <div class="hc-stat"><div class="hc-label">現在値</div><div class="hc-value ${h.price!==h.avgCost ? '' : 'neutral'}">${h.price!==h.avgCost ? yen(h.price,1) : '未取得'}</div></div>
+              <div class="hc-stat"><div class="hc-label">評価額</div><div class="hc-value">${yen(h.value)}</div></div>
+              <div class="hc-stat"><div class="hc-label">前日比</div><div class="hc-value ${sc(h.dayChg)}">${sg(h.dayChg)}${yen(h.dayChg)}</div></div>
+              <div class="hc-stat"><div class="hc-label">前日比率</div><div class="hc-value ${sc(h.dayChgPct)}">${sg(h.dayChgPct)}${pct(h.dayChgPct)}</div></div>
             </div>
-            <div id="importLog" class="import-log" style="display:none"></div>
-          </div>
-        </div>
-        <div style="display:flex;flex-direction:column;gap:18px">
-          <div class="card">
-            <div class="card-header"><span class="card-title">対応証券会社</span></div>
-            <div class="card-body">
-              <table style="width:100%;font-size:.85rem;border-collapse:collapse">
-                ${[['SBI証券','取引履歴.csv'],['楽天証券','取引履歴.csv'],['松井証券','取引一覧.csv'],['マネックス証券','取引履歴.csv']].map(([b,f])=>`
-                  <tr style="border-top:1px solid var(--c-border)"><td style="padding:10px 0;font-weight:500">${b}</td><td style="padding:10px 0;color:var(--c-text-3)">${f}</td></tr>`).join('')}
-              </table>
+            <div class="hc-actions">
+              <button class="action-btn" onclick="App.openModal('${h.id}')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                編集
+              </button>
+              <button class="action-btn del" onclick="App.deleteHolding('${h.id}')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+                削除
+              </button>
             </div>
-          </div>
-          <div class="info-block">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-            <span>重複する取引は自動的にスキップされます。同じファイルを複数回取込んでも二重登録にはなりません。</span>
-          </div>
-        </div>
-      </div>`);
-    const dz = document.getElementById('dz');
-    dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
-    dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
-    dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('drag-over'); this._processFiles(e.dataTransfer.files); });
-    document.getElementById('csvFile').addEventListener('change', e => { this._processFiles(e.target.files); e.target.value=''; });
+          </div>`).join('')}
+      </div>` : ''}
+    `;
   },
 
-  // ヘッダー行を自動検出してパース（先頭の説明行・空行を読み飛ばす）
-  _parseCSV(text) {
-    const lines = text.split(/\r?\n/);
-    const KEYS = ['約定日','取引日','受渡日','銘柄コード','銘柄名','銘柄','コード','数量','約定数量','株数',
-                  '受渡金額','預り区分','口座区分','売買','売買区分','取引','取引区分','単価','約定単価','区分'];
-    let headerIdx = 0, best = -1;
-    for (let i = 0; i < Math.min(lines.length, 25); i++) {
-      const c = KEYS.filter(k => lines[i].includes(k)).length;
-      if (c > best) { best = c; headerIdx = i; }
-    }
-    const sliced = lines.slice(headerIdx).join('\n').trim();
-    return Papa.parse(sliced, { header: true, skipEmptyLines: 'greedy' });
-  },
+  setHoldFilter(f) { this.holdFilter = f; this.renderHoldings(); },
 
-  // SBI「保有証券一覧」CSV を解析。該当しなければ null。
-  // 口座区分はセクション見出し「株式（特定預り）」等から判定する。
-  _parseSBIHoldings(text) {
-    const rows = Papa.parse(text.replace(/\r/g, '').trim(), { skipEmptyLines: false }).data;
-    const looksLikeHoldings = rows.some(r => {
-      const j = (r || []).join(',');
-      return j.includes('保有株数') && j.includes('取得単価') && j.includes('銘柄');
-    });
-    if (!looksLikeHoldings) return null;
-
-    const today = new Date().toISOString().slice(0, 10);
-    const out = [];
-    let account = '特定', inData = false;
-    for (const r of rows) {
-      const c0 = String((r && r[0]) ?? '').trim();
-      if (!r || r.join('').trim() === '') { inData = false; continue; }
-      // セクション見出し：「株式（特定預り）」「株式（NISA預り）」等（「合計」行は除外）
-      const m = c0.match(/^株式（(.+?)）$/);
-      if (m && !/合計/.test(c0)) { account = Utils.mapAccount(m[1]); inData = false; continue; }
-      // データのヘッダー行
-      if (r.join(',').includes('銘柄コード') && r.join(',').includes('保有株数')) { inData = true; continue; }
-      if (!inData) continue;
-      // データ行： 銘柄コード,銘柄名称,保有株数,売却注文中,取得単価,現在値,取得金額,…
-      const code = c0.replace(/"/g, '').trim();
-      if (!/^\d{3,4}[A-Z]?$/.test(code)) continue;
-      const shares = Utils.num(r[2]);
-      const price  = Utils.num(r[4]);
-      const amount = Utils.num(r[6]);
-      if (!shares) continue;
-      out.push({
-        id: Utils.uid(), source: 'sbi-holdings',
-        symbolCode: code, symbolName: String(r[1] ?? '').replace(/"/g, '').trim(),
-        date: today, account, side: 'buy',
-        shares, price, amount: amount || Math.round(shares * price),
-        note: '保有CSV取込',
-      });
-    }
-    return out.length ? out : null;
-  },
-
-  _processFiles(files) {
-    const log = document.getElementById('importLog');
-    log.style.display = 'block'; log.innerHTML = '';
-    const add = (msg, cls='') => { log.innerHTML += `<div class="${cls}">${msg}</div>`; log.scrollTop = log.scrollHeight; };
-    Array.from(files).forEach(file => {
-      add(`<span class="log-info">📂 ${file.name}</span>`);
+  /* ===== CSV Import ===== */
+  triggerCsvImport() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.csv';
+    input.addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
       const reader = new FileReader();
-      reader.onload = () => {
-        // 文字コード判定（Shift-JIS優先、文字化けしたらUTF-8）
-        let text = new TextDecoder('shift-jis').decode(reader.result);
-        if (/�/.test(text)) text = new TextDecoder('utf-8', { fatal: false }).decode(reader.result);
-
-        // ★ SBI「保有証券一覧」CSV を先に判定（取引履歴ではなく保有スナップショット）
-        const holdings = this._parseSBIHoldings(text);
-        if (holdings) {
-          add(`📊 SBI 保有証券一覧CSV と判定 / ${holdings.length} 銘柄`);
-          this._applyImport(holdings, 'sbi-holdings', 'SBI保有', add);
-          add('<span class="text-muted">※保有CSVは日付が無いため、本日付の「買い」として登録（過去の売買・配当履歴は含まれません）。</span>');
-          return;
-        }
-
-        const parsed = this._parseCSV(text);
-        const fields = (parsed.meta.fields ?? []).map(f => String(f).trim());
-
-        let broker = document.getElementById('brokerSel')?.value ?? 'auto';
-        if (broker === 'auto') broker = detectBroker(fields);
-        if (!broker) {
-          add('❌ 証券会社を自動判定できませんでした', 'log-err');
-          add(`<span class="text-muted">検出した列名: ${fields.join(' / ') || '(なし)'}</span>`);
-          add('<span class="text-muted">↑この列名をコピーして開発者に伝えてください。または上の「証券会社」を手動選択してお試しください。</span>');
-          console.log('CSV fields:', fields, 'sample row:', parsed.data[0]);
-          return;
-        }
-        add(`🔍 ${broker} / ${parsed.data.length} 行`);
-        const recs = normalizeCSV(parsed.data, broker);
-        if (!recs.length) {
-          add('❌ 有効な行が0件です', 'log-err');
-          add(`<span class="text-muted">検出した列名: ${fields.join(' / ') || '(なし)'}</span>`);
-          add(`<span class="text-muted">1行目のデータ例: ${JSON.stringify(parsed.data[0] ?? {}).slice(0,300)}</span>`);
-          console.log('CSV fields:', fields, 'sample row:', parsed.data[0]);
-          return;
-        }
-        this._applyImport(recs, broker.toLowerCase(), broker, add);
-      };
-      reader.readAsArrayBuffer(file);
+      reader.onload = ev => this._parseCsvHoldings(ev.target.result, file.name);
+      reader.readAsText(file, 'Shift_JIS');
     });
+    input.click();
   },
 
-  // 取込の適用：モード別（追加 / この証券だけ置換 / 全置換）
-  _applyImport(recs, sourceTag, label, add) {
-    recs.forEach(r => { r.source = sourceTag; });
-    const mode = document.getElementById('importMode')?.value ?? 'append';
+  _parseCsvHoldings(text, filename) {
+    const lines = text.split(/\r?\n/);
+    const parsed = [];
+    let currentAccount = '特定';
+
+    // SBI保有証券一覧CSV: 口座区分はセクションヘッダーから取得
+    const accountMap = { '特定預り': '特定', '一般預り': '一般', 'NISA預り': 'NISA', '成長投資枠': 'NISA', '積立投資枠': 'NISA' };
+
+    // ヘッダー行を探す
+    let headerIdx = -1;
+    let codeCol = -1, nameCol = -1, sharesCol = -1, costCol = -1;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
+      // 口座区分セクションヘッダー検出
+      for (const [key, val] of Object.entries(accountMap)) {
+        if (line.includes(key)) { currentAccount = val; break; }
+      }
+
+      // ヘッダー行検出（銘柄コード列を探す）
+      if (line.includes('銘柄コード') || line.includes('コード')) {
+        const cols = this._splitCsvLine(line);
+        codeCol   = cols.findIndex(c => /銘柄コード|コード/.test(c));
+        nameCol   = cols.findIndex(c => /銘柄名|銘柄/.test(c) && !/コード/.test(c));
+        sharesCol = cols.findIndex(c => /保有株数|株数|数量/.test(c));
+        costCol   = cols.findIndex(c => /取得単価|平均取得|単価/.test(c));
+        if (codeCol >= 0 && sharesCol >= 0) { headerIdx = i; }
+        continue;
+      }
+
+      if (headerIdx < 0) continue;
+
+      const cols = this._splitCsvLine(line);
+      if (cols.length < 3) continue;
+
+      const code   = codeCol >= 0 ? cols[codeCol]?.replace(/\D/g, '') : '';
+      const name   = nameCol >= 0 ? cols[nameCol]?.trim() : '';
+      const shares = sharesCol >= 0 ? parseFloat(cols[sharesCol]?.replace(/,/g, '')) : 0;
+      const cost   = costCol >= 0 ? parseFloat(cols[costCol]?.replace(/,/g, '')) : 0;
+
+      if (!code || code.length < 4 || !shares || shares <= 0) continue;
+
+      parsed.push({ code, name: name || code, shares, avgCost: cost || 0, account: currentAccount });
+    }
+
+    if (!parsed.length) {
+      Toast.show('有効な銘柄が見つかりませんでした。SBI保有証券一覧CSVをご確認ください。', 'error', 5000);
+      return;
+    }
+
+    // 確認ダイアログ
+    const msg = `${parsed.length}件の銘柄を検出しました。\n\n` +
+      parsed.map(h => `${h.code} ${h.name} ${h.shares}株 @${h.avgCost}円 [${h.account}]`).join('\n') +
+      '\n\n【追加】既存データに追記\n【置換】既存データをすべて置き換え';
+
+    const mode = confirm(msg + '\n\nOK=追加 / キャンセル=置換') ? 'append' : 'replace';
 
     if (mode === 'replace') {
-      if (!confirm(`【全置換】既存の ${this.trades.length} 件をすべて削除し、今回の ${recs.length} 件に入れ替えます。よろしいですか？`)) { add('⏹ キャンセルしました'); return; }
-      this.trades = recs;
-      add(`✅ 全データを ${recs.length} 件で置き換えました`, 'log-ok');
-      Toast.show(`${label}: ${recs.length} 件で全置換`, 'success');
-
-    } else if (mode === 'replace-source') {
-      const removed = this.trades.filter(t => t.source === sourceTag).length;
-      this.trades = this.trades.filter(t => t.source !== sourceTag).concat(recs);
-      add(`✅ 「${label}」のデータを入替（旧 ${removed} 件 → 新 ${recs.length} 件）。他の証券会社のデータは保持`, 'log-ok');
-      Toast.show(`${label}: ${recs.length} 件で入替`, 'success');
-
-    } else {
-      const exist = new Set(this.trades.map(deduplicateKey));
-      const fresh = recs.filter(r => !exist.has(deduplicateKey(r)));
-      this.trades = this.trades.concat(fresh);
-      add(`✅ ${fresh.length} 件追加（重複スキップ: ${recs.length - fresh.length} 件）`, 'log-ok');
-      Toast.show(`${label}: ${fresh.length} 件追加`, 'success');
+      if (!confirm('既存の保有銘柄を全て削除して置き換えますか？')) return;
+      this.holdings = [];
     }
-    TradeStorage.save(this.trades);
-  },
 
-  /* ============================================================
-     SETTINGS
-     ============================================================ */
-  renderSettings() {
-    this.html(`
-      <div class="settings-grid">
-        <div style="display:flex;flex-direction:column;gap:16px">
-          ${this._syncCard()}
-          <div class="card">
-            <div class="card-header"><span class="card-title">💾 バックアップ・復元</span></div>
-            <div class="card-body" style="display:flex;flex-direction:column;gap:12px">
-              <div class="info-block">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-                <span>データは<strong>このブラウザの localStorage</strong> に保存されています。ブラウザデータ削除や機種変更の前に必ずバックアップを取ってください。</span>
-              </div>
-              <button class="btn btn-primary" onclick="App._exportData()">📤 JSONバックアップを保存</button>
-              <div style="position:relative;border:2px dashed var(--c-border);border-radius:var(--r-lg);padding:20px;text-align:center;cursor:pointer" id="jsonDz">
-                <p style="font-weight:600;color:var(--c-text-2);font-size:.875rem">📥 バックアップから復元（クリック）</p>
-                <input type="file" accept=".json" id="jsonFile" style="position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%">
-              </div>
-              <div id="settingsLog" class="import-log" style="display:none"></div>
-            </div>
-          </div>
-        </div>
-        <div style="display:flex;flex-direction:column;gap:16px">
-          <div class="card">
-            <div class="card-header"><span class="card-title">📊 データ概要</span></div>
-            <div class="card-body" style="font-size:.875rem">
-              ${[['取引件数',`${this.trades.length.toLocaleString()} 件`],['うち買付',`${this.trades.filter(t=>t.side==='buy').length.toLocaleString()} 件`],['うち売却',`${this.trades.filter(t=>t.side==='sell').length.toLocaleString()} 件`],['手入力',`${this.trades.filter(t=>t.source==='manual').length.toLocaleString()} 件`]].map(([k,v])=>`<div class="pnl-row"><span class="pnl-label">${k}</span><span class="fw7">${v}</span></div>`).join('')}
-            </div>
-          </div>
-          <div class="card" style="border-color:#fca5a5">
-            <div class="card-header"><span class="card-title" style="color:#dc2626">⚠️ データ削除</span></div>
-            <div class="card-body"><p class="text-sm text-muted" style="margin-bottom:12px">すべての取引データを削除します。元に戻せません。</p>
-              <button class="btn btn-danger" onclick="App._clearAll()">すべてのデータを削除</button></div>
-          </div>
-        </div>
-      </div>`);
-    document.getElementById('jsonFile').addEventListener('change', e => {
-      const f = e.target.files[0]; if (!f) return;
-      const r = new FileReader();
-      r.onload = () => this._importJSON(r.result);
-      r.readAsText(f,'utf-8'); e.target.value='';
+    let added = 0;
+    parsed.forEach(h => {
+      const exists = this.holdings.find(x => x.code === h.code && x.account === h.account);
+      if (exists) {
+        exists.shares   = h.shares;
+        exists.avgCost  = h.avgCost;
+        exists.updatedAt = Date.now();
+      } else {
+        this.holdings.push({ id: uid(), ...h, memo: '', addedAt: Date.now(), updatedAt: Date.now() });
+        added++;
+      }
     });
+
+    HoldingStorage.save(this.holdings);
+    Sync.push();
+    Toast.show(`${parsed.length}件インポート完了（新規${added}件・更新${parsed.length - added}件）`, 'success', 5000);
+
+    // 株価・配当を取得
+    const codes = [...new Set(parsed.map(h => h.code))];
+    this._fetchQuotes(codes, false).then(() => this.renderPage());
+    this._fetchDividends(codes);
+    this.renderPage();
   },
 
-  _syncCard() {
-    const S = (typeof Sync !== 'undefined') ? Sync : { status: 'unconfigured' };
-
-    if (S.status === 'unconfigured') {
-      return `<div class="card" style="border-color:#fcd34d">
-        <div class="card-header"><span class="card-title">☁️ アカウント（未設定）</span></div>
-        <div class="card-body" style="font-size:.875rem;line-height:1.7">
-          <div class="fetch-banner fetch-banner-warn" style="margin-bottom:0">
-            ログイン機能が読み込めませんでした。通信環境を確認してアプリを開き直してください。
-          </div>
-        </div>
-      </div>`;
+  _splitCsvLine(line) {
+    const result = [];
+    let cur = '', inQ = false;
+    for (const ch of line) {
+      if (ch === '"') { inQ = !inQ; }
+      else if (ch === ',' && !inQ) { result.push(cur.trim()); cur = ''; }
+      else { cur += ch; }
     }
+    result.push(cur.trim());
+    return result;
+  },
 
-    if (S.status === 'on') {
-      const u    = S.user || {};
-      const name = u.displayName || u.email || 'ログイン中';
-      const photo = u.photoURL
-        ? `<img src="${u.photoURL}" alt="" style="width:40px;height:40px;border-radius:50%;flex-shrink:0">`
-        : `<div style="width:40px;height:40px;border-radius:50%;background:var(--c-primary);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0">${this.esc((name[0]||'U').toUpperCase())}</div>`;
-      return `<div class="card" style="border-color:#86efac">
-        <div class="card-header"><span class="card-title">☁️ アカウント</span>
-          <span class="sync-status sync-on">● 同期中</span></div>
-        <div class="card-body" style="font-size:.875rem">
-          <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
-            ${photo}
-            <div style="min-width:0">
-              <div class="fw7" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${this.esc(name)}</div>
-              ${u.email && u.displayName ? `<div class="text-xs text-muted" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${this.esc(u.email)}</div>` : ''}
-            </div>
-          </div>
-          <div class="fetch-banner" style="background:#f0fdf4;border:1.5px solid #86efac;color:#166534;margin-bottom:12px">
-            データはこのアカウントに紐づいて保存されています。<b>他の端末でも同じアカウントでログイン</b>すれば自動で同期されます。
-          </div>
-          <button class="btn btn-ghost" style="width:100%" onclick="Sync.logout()">ログアウト</button>
+  /* ===== Dividends ===== */
+  renderDividends() {
+    const year   = this.divYear;
+    const years  = Array.from({ length: 6 }, (_, i) => new Date().getFullYear() - i);
+    const result = Portfolio.annualDividend(this.holdings, this.dividends, year, this.taxAfter);
+    const months = Portfolio.monthlyDividend(this.holdings, this.dividends, year, this.taxAfter);
+    const monthMax = Math.max(...months);
+    const totalPre  = Portfolio.annualDividend(this.holdings, this.dividends, year, false).total;
+    const totalPost = Portfolio.annualDividend(this.holdings, this.dividends, year, true).total;
+
+    const el = document.getElementById('page-area');
+    el.innerHTML = `
+      <div class="div-hdr">
+        <div class="year-tabs">
+          ${years.map(y => `<button class="year-tab ${y===year?'active':''}" onclick="App.setDivYear(${y})">${y}年</button>`).join('')}
         </div>
-      </div>`;
-    }
-
-    // signedout / error → ログインフォーム
-    const errBanner = S.status === 'error'
-      ? `<div class="fetch-banner fetch-banner-warn" style="margin-bottom:12px">接続でエラーが発生しました。少し待ってから再度お試しください。</div>` : '';
-    return `<div class="card">
-      <div class="card-header"><span class="card-title">☁️ ログイン / 新規登録</span>
-        <span class="sync-status sync-off">○ 未ログイン</span></div>
-      <div class="card-body" style="font-size:.875rem">
-        ${errBanner}
-        <p style="margin-bottom:12px;color:var(--c-text-2)">ログインすると、データがクラウドに保存され、<b>PC・スマホで自動同期</b>されます。</p>
-
-        <button class="btn" style="width:100%;border:1.5px solid var(--c-border);background:#fff;display:flex;align-items:center;justify-content:center;gap:10px;font-weight:600" onclick="Sync.loginGoogle()">
-          <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.5 6.5 29.5 4.5 24 4.5 13.2 4.5 4.5 13.2 4.5 24S13.2 43.5 24 43.5 43.5 34.8 43.5 24c0-1.2-.1-2.3-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.5 6.5 29.5 4.5 24 4.5 16.3 4.5 9.7 8.9 6.3 14.7z"/><path fill="#4CAF50" d="M24 43.5c5.4 0 10.3-2.1 14-5.5l-6.5-5.5c-2 1.5-4.6 2.5-7.5 2.5-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.6 39 16.2 43.5 24 43.5z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.2 4.3-4.1 5.6l6.5 5.5c-.5.4 7-5.1 7-15.1 0-1.2-.1-2.3-.4-3.5z"/></svg>
-          Googleでログイン
-        </button>
-
-        <div style="display:flex;align-items:center;gap:10px;margin:16px 0;color:var(--c-text-3);font-size:.8rem">
-          <div style="flex:1;height:1px;background:var(--c-border)"></div>または<div style="flex:1;height:1px;background:var(--c-border)"></div>
+        <div class="tax-toggle">
+          <button class="tax-btn ${!this.taxAfter?'active':''}" onclick="App.setTax(false)">税引前</button>
+          <button class="tax-btn ${this.taxAfter?'active':''}" onclick="App.setTax(true)">税引後</button>
         </div>
-
-        <input class="form-input" id="authEmail" type="email" placeholder="メールアドレス" autocapitalize="off" autocomplete="email" style="margin-bottom:8px">
-        <input class="form-input" id="authPw" type="password" placeholder="パスワード（6文字以上）" autocomplete="current-password" style="margin-bottom:10px">
-        <div style="display:flex;gap:8px">
-          <button class="btn btn-primary" style="flex:1" onclick="App._loginEmail()">ログイン</button>
-          <button class="btn btn-ghost" style="flex:1;border:1.5px solid var(--c-border)" onclick="App._signupEmail()">新規登録</button>
-        </div>
-        <p class="text-xs text-muted" style="margin-top:10px">初めての方は「新規登録」、登録済みの方は「ログイン」を押してください。</p>
       </div>
-    </div>`;
-  },
 
-  _loginEmail() {
-    const email = document.getElementById('authEmail')?.value?.trim();
-    const pw    = document.getElementById('authPw')?.value;
-    if (!email || !pw) { Toast.show('メールアドレスとパスワードを入力してください', 'error'); return; }
-    Sync.loginEmail(email, pw);
-  },
-  _signupEmail() {
-    const email = document.getElementById('authEmail')?.value?.trim();
-    const pw    = document.getElementById('authPw')?.value;
-    if (!email || !pw) { Toast.show('メールアドレスとパスワードを入力してください', 'error'); return; }
-    Sync.signupEmail(email, pw);
-  },
+      <div class="div-summary">
+        <div class="card">
+          <div class="card-title">年間配当合計</div>
+          <div class="card-value">${yen(result.total)}</div>
+          <div class="card-sub">${this.taxAfter ? '税引後' : '税引前'}</div>
+        </div>
+        <div class="card">
+          <div class="card-title">月平均</div>
+          <div class="card-value">${yen(result.total / 12)}</div>
+          <div class="card-sub">1ヶ月あたり</div>
+        </div>
+        <div class="card">
+          <div class="card-title">税額概算</div>
+          <div class="card-value loss">${yen(totalPre - totalPost)}</div>
+          <div class="card-sub">約20.315%</div>
+        </div>
+      </div>
 
-  _exportData() { TradeStorage.exportJSON(this.trades); Toast.show('バックアップを保存しました','success'); },
-  _importJSON(text) {
-    const log = document.getElementById('settingsLog');
-    if (log) log.style.display='block';
-    try {
-      const inc  = TradeStorage.importJSON(text);
-      const exist= new Set(this.trades.map(deduplicateKey));
-      const fresh= inc.filter(r => !exist.has(deduplicateKey(r)));
-      this.trades= this.trades.concat(fresh);
-      TradeStorage.save(this.trades);
-      if (log) log.innerHTML=`<span class="log-ok">✅ ${fresh.length} 件復元（重複スキップ: ${inc.length-fresh.length} 件）</span>`;
-      Toast.show(`${fresh.length} 件を復元しました`,'success');
-    } catch { if (log) log.innerHTML='<span class="log-err">❌ ファイルが正しくありません</span>'; Toast.show('復元に失敗しました','error'); }
-  },
-  _clearAll() {
-    if (!confirm('すべての取引データを削除します。\nこの操作は元に戻せません。')) return;
-    this.trades=[]; TradeStorage.save(this.trades); Toast.show('データを削除しました','info'); this.navigate('dashboard');
-  },
+      <div class="card" style="margin-bottom:20px">
+        <div class="card-title">月別配当金 (${year}年)</div>
+        <div class="div-chart-wrap"><canvas id="chart-div"></canvas></div>
+      </div>
 
-  /* ============================================================
-     MODAL
-     ============================================================ */
-  _setupModal() {
-    document.getElementById('modalClose').addEventListener('click',    () => this.closeModal());
-    document.getElementById('modalCancelBtn').addEventListener('click',() => this.closeModal());
-    document.getElementById('modalSubmitBtn').addEventListener('click',() => this._submitTrade());
-    document.getElementById('modalBackdrop').addEventListener('click', e => { if (e.target.id==='modalBackdrop') this.closeModal(); });
-    document.addEventListener('keydown', e => { if (e.key==='Escape') this.closeModal(); });
-    document.querySelectorAll('.side-btn').forEach(btn => btn.addEventListener('click', () => {
-      document.querySelectorAll('.side-btn').forEach(b=>b.classList.remove('active'));
-      btn.classList.add('active');
-      document.getElementById('f-side').value = btn.dataset.v;
-    }));
-    const calc = () => {
-      const s=parseFloat(document.getElementById('f-shares')?.value)||0;
-      const p=parseFloat(document.getElementById('f-price')?.value)||0;
-      const a=document.getElementById('f-amount');
-      if (s>0&&p>0&&a&&!a._edited) a.value=Math.round(s*p);
-    };
-    document.getElementById('f-shares')?.addEventListener('input',calc);
-    document.getElementById('f-price')?.addEventListener('input',calc);
-    document.getElementById('f-amount')?.addEventListener('input',function(){this._edited=true;});
+      ${result.byStock.length ? `
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>銘柄</th><th>口座</th>
+            <th class="num">保有株数</th><th class="num">1株配当</th>
+            <th class="num">税引前</th><th class="num">税引後</th>
+          </tr></thead>
+          <tbody>
+            ${result.byStock.map(s => `<tr>
+              <td><div style="font-size:.75rem;color:var(--text-3)">${s.code}</div><div style="font-weight:600">${s.name}</div></td>
+              <td><span class="account-badge ${s.account}">${s.account}</span></td>
+              <td class="num">${num(s.shares)}</td>
+              <td class="num">${yen(s.perShare,1)}</td>
+              <td class="num">${yen(s.gross)}</td>
+              <td class="num">${yen(s.net)}</td>
+            </tr>`).join('')}
+          </tbody>
+          <tfoot><tr class="tfoot-row">
+            <td colspan="4">合計</td>
+            <td class="num">${yen(totalPre)}</td>
+            <td class="num">${yen(totalPost)}</td>
+          </tr></tfoot>
+        </table>
+      </div>` : `<div class="card"><p style="color:var(--text-2);text-align:center;padding:32px">${year}年の配当データがありません</p></div>`}
+    `;
 
-    // 銘柄コード ⇄ 銘柄名 の自動補完
-    let codeTimer, nameTimer;
-    document.getElementById('f-code')?.addEventListener('input', () => {
-      clearTimeout(codeTimer);
-      codeTimer = setTimeout(() => this._lookupByCode(), 500);
+    this._destroyChart('div');
+    this._charts['div'] = new Chart(document.getElementById('chart-div'), {
+      type: 'bar',
+      data: {
+        labels: ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'],
+        datasets: [{
+          data: months,
+          backgroundColor: months.map(v => v > 0 ? 'rgba(37,99,235,.75)' : 'rgba(203,213,225,.5)'),
+          borderRadius: 5,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: { display: false }, ticks: { font: { size: 11 } } },
+          y: { ticks: { callback: v => yen(v), font: { size: 11 } }, grid: { color: '#f1f5f9' }, min: 0 },
+        },
+      },
     });
-    document.getElementById('f-name')?.addEventListener('input', () => {
-      clearTimeout(nameTimer);
-      nameTimer = setTimeout(() => this._lookupByName(), 600);
+  },
+
+  setDivYear(y) { this.divYear = y; this.renderDividends(); },
+  setTax(after) { this.taxAfter = after; this.renderDividends(); },
+
+  /* ===== P&L ===== */
+  renderPnL() {
+    const enriched = Portfolio.calcAll(this.holdings, this.quotes);
+    const sum      = Portfolio.summary(enriched);
+    const sorted   = [...enriched].sort((a, b) => b.pnl - a.pnl);
+
+    const el = document.getElementById('page-area');
+    el.innerHTML = `
+      <div class="pnl-grid">
+        <div class="card">
+          <div class="card-title">含み損益合計</div>
+          <div class="card-value ${sc(sum.pnl)}">${sg(sum.pnl)}${yen(sum.pnl)}</div>
+          <div class="card-sub ${sc(sum.pnlPct)}">${sg(sum.pnlPct)}${pct(sum.pnlPct)}</div>
+        </div>
+        <div class="card">
+          <div class="card-title">本日の変動</div>
+          <div class="card-value ${sc(sum.dayChg)}">${sg(sum.dayChg)}${yen(sum.dayChg)}</div>
+          <div class="card-sub">前日比 合計</div>
+        </div>
+        <div class="card">
+          <div class="card-title">取得総額</div>
+          <div class="card-value">${yen(sum.totalCost)}</div>
+          <div class="card-sub">現在 ${yen(sum.totalValue)}</div>
+        </div>
+      </div>
+
+      ${enriched.length ? `
+      <div class="card" style="margin-bottom:20px">
+        <div class="card-title">銘柄別 評価損益</div>
+        <div class="pnl-chart-wrap"><canvas id="chart-pnl-h"></canvas></div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>銘柄</th>
+            <th class="num">現在値</th>
+            <th class="num">取得単価</th>
+            <th class="num">株数</th>
+            <th class="num">評価損益</th>
+            <th class="num">損益率</th>
+            <th class="num">前日比(株)</th>
+            <th class="num">前日比率</th>
+          </tr></thead>
+          <tbody>
+            ${sorted.map(h => `<tr>
+              <td>
+                <div style="font-size:.75rem;color:var(--text-3)">${h.code}</div>
+                <div style="font-weight:600">${h.name}</div>
+              </td>
+              <td class="num">${h.price !== h.avgCost ? yen(h.price,1) : '<span style="color:var(--text-3)">未取得</span>'}</td>
+              <td class="num">${yen(h.avgCost,1)}</td>
+              <td class="num">${num(h.shares)}</td>
+              <td class="num"><span class="${sc(h.pnl)}" style="font-weight:700">${sg(h.pnl)}${yen(h.pnl)}</span></td>
+              <td class="num">${badge(h.pnlPct)}</td>
+              <td class="num"><span class="${sc(h.dayChg)}">${sg(h.dayChg)}${yen(h.dayChg)}</span></td>
+              <td class="num">${badge(h.dayChgPct)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>` : `<div class="empty-state"><h3>銘柄を登録してください</h3></div>`}
+    `;
+
+    if (!enriched.length) return;
+    this._destroyChart('pnl-h');
+    this._charts['pnl-h'] = new Chart(document.getElementById('chart-pnl-h'), {
+      type: 'bar',
+      data: {
+        labels: sorted.map(h => h.name || h.code),
+        datasets: [{
+          label: '評価損益',
+          data: sorted.map(h => h.pnl),
+          backgroundColor: sorted.map(h => h.pnl >= 0 ? 'rgba(22,163,74,.75)' : 'rgba(220,38,38,.75)'),
+          borderRadius: 4,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { callback: v => yen(v), font: { size: 11 } }, grid: { color: '#f1f5f9' } },
+          y: { ticks: { font: { size: 11 } }, grid: { display: false } },
+        },
+      },
     });
   },
 
-  // 自分の取引履歴から作る辞書（コード⇄名前）。手早く確実。
-  _symbolDict() {
-    const c2n = {}, n2c = {};
-    this.trades.forEach(t => {
-      if (t.symbolCode && t.symbolName) { c2n[t.symbolCode] = t.symbolName; n2c[t.symbolName] = t.symbolCode; }
-    });
-    return { c2n, n2c };
+  /* ===== Settings ===== */
+  renderSettings() {
+    this._updateSyncBadge();
+    const user = Sync.user;
+    const st   = Sync.status;
+
+    const el = document.getElementById('page-area');
+    el.innerHTML = `
+      <div class="settings-section">
+        <h3>クラウド同期</h3>
+        ${user ? `
+          <div class="settings-row">
+            <div><div class="settings-label">ログイン中</div><div class="settings-sub">${user.email || 'Google アカウント'}</div></div>
+            <span class="sync-on">● 同期中</span>
+          </div>
+          <div class="settings-row">
+            <div class="settings-label">ログアウト</div>
+            <button class="btn-ghost" onclick="Sync.logout()">ログアウト</button>
+          </div>` : `
+          <p style="font-size:.875rem;color:var(--text-2);margin-bottom:16px">ログインするとデータが複数端末で同期されます</p>
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <button class="btn-google" onclick="Sync.loginGoogle()">
+              <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#4285F4" d="M47.5 24.6c0-1.6-.1-3.1-.4-4.6H24v8.7h13.1c-.6 3-2.3 5.5-4.9 7.2v6h7.9c4.6-4.2 7.4-10.5 7.4-17.3z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.9-6c-2.1 1.4-4.9 2.3-8 2.3-6.1 0-11.3-4.1-13.2-9.7H2.7v6.2C6.6 42.6 14.7 48 24 48z"/><path fill="#FBBC05" d="M10.8 28.8c-.5-1.4-.7-2.9-.7-4.8s.3-3.3.7-4.8V13H2.7C1 16.4 0 20.1 0 24s1 7.6 2.7 11L10.8 28.8z"/><path fill="#EA4335" d="M24 9.5c3.4 0 6.5 1.2 8.9 3.5l6.7-6.7C35.9 2.5 30.4 0 24 0 14.7 0 6.6 5.4 2.7 13l8.1 6.2C12.7 13.6 17.9 9.5 24 9.5z"/></svg>
+              Googleでログイン
+            </button>
+            <div class="or-divider">または</div>
+            <div id="email-form" style="display:flex;flex-direction:column;gap:8px">
+              <input class="form-input" id="set-email" type="email" placeholder="メールアドレス">
+              <input class="form-input" id="set-pw" type="password" placeholder="パスワード（6文字以上）">
+              <div style="display:flex;gap:8px">
+                <button class="btn-ghost" style="flex:1" onclick="App._emailLogin()">ログイン</button>
+                <button class="btn-primary-sm" style="flex:1;justify-content:center" onclick="App._emailSignup()">新規登録</button>
+              </div>
+            </div>
+          </div>`}
+      </div>
+
+      <div class="settings-section">
+        <h3>データ管理</h3>
+        <div class="settings-row">
+          <div><div class="settings-label">データをエクスポート</div><div class="settings-sub">保有銘柄をJSONで保存</div></div>
+          <button class="btn-ghost" onclick="App.exportData()">エクスポート</button>
+        </div>
+        <div class="settings-row">
+          <div><div class="settings-label">株価キャッシュを削除</div><div class="settings-sub">次回起動時に再取得されます</div></div>
+          <button class="btn-ghost" onclick="App.clearQuoteCache()">削除</button>
+        </div>
+        <div class="settings-row">
+          <div><div class="settings-label" style="color:var(--loss)">全データを削除</div><div class="settings-sub">保有銘柄を全て消去します</div></div>
+          <button class="btn-danger" onclick="App.clearAll()">全削除</button>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>アプリ情報</h3>
+        <div class="settings-row">
+          <div class="settings-label">株価更新</div>
+          <span style="font-size:.875rem;color:var(--text-2)">15分間隔・自動</span>
+        </div>
+        <div class="settings-row">
+          <div class="settings-label">最終更新</div>
+          <span style="font-size:.875rem;color:var(--text-2)">${this.quoteTime ?? 'データ未取得'}</span>
+        </div>
+        <div class="settings-row">
+          <div class="settings-label">登録銘柄数</div>
+          <span style="font-size:.875rem;color:var(--text-2)">${this.holdings.length} 銘柄</span>
+        </div>
+      </div>
+    `;
   },
 
-  async _lookupByCode() {
-    const codeEl = document.getElementById('f-code');
-    const nameEl = document.getElementById('f-name');
-    if (!codeEl || !nameEl) return;
-    const code = codeEl.value.trim();
-    if (!/^\d{4}$/.test(code)) return;
-    if (nameEl.value.trim() && !nameEl._auto) return;   // 手入力済みなら上書きしない
+  _emailLogin()  { Sync.loginEmail(document.getElementById('set-email').value, document.getElementById('set-pw').value); },
+  _emailSignup() { Sync.signupEmail(document.getElementById('set-email').value, document.getElementById('set-pw').value); },
 
-    // ① まず自分の履歴から
-    const { c2n } = this._symbolDict();
-    if (c2n[code]) { nameEl.value = c2n[code]; nameEl._auto = true; return; }
+  /* ===== Modal ===== */
+  openModal(id = null) {
+    this._editId = id;
+    const overlay = document.getElementById('modal-overlay');
+    document.getElementById('modal-title').textContent = id ? '銘柄を編集' : '銘柄を追加';
 
-    // ② Yahooで検索
-    nameEl.placeholder = '銘柄名を取得中…';
-    const hits = await YahooFinance.searchSymbol(code + '.T');
-    const hit = hits.find(h => h.code === code) || hits[0];
-    nameEl.placeholder = '例: トヨタ自動車';
-    if (hit && (!nameEl.value.trim() || nameEl._auto)) { nameEl.value = hit.name; nameEl._auto = true; }
-  },
+    // Reset form
+    ['m-code','m-name','m-shares','m-avg-cost','m-memo'].forEach(i => document.getElementById(i).value = '');
+    document.getElementById('m-id').value = '';
+    document.getElementById('m-account').value = '特定';
+    document.querySelectorAll('#holding-modal .tab-btn').forEach(b => b.classList.toggle('active', b.dataset.val === '特定'));
 
-  async _lookupByName() {
-    const codeEl = document.getElementById('f-code');
-    const nameEl = document.getElementById('f-name');
-    if (!codeEl || !nameEl) return;
-    const name = nameEl.value.trim();
-    nameEl._auto = false;                 // 名前を手入力したら自動フラグ解除
-    if (name.length < 2) return;
-    if (codeEl.value.trim()) return;       // コードが既にあるなら触らない
-
-    // ① 自分の履歴から（完全一致 or 部分一致）
-    const { n2c } = this._symbolDict();
-    if (n2c[name]) { codeEl.value = n2c[name]; return; }
-    const partial = Object.keys(n2c).find(k => k.includes(name) || name.includes(k));
-    if (partial) { codeEl.value = n2c[partial]; return; }
-
-    // ② Yahooで検索
-    const hits = await YahooFinance.searchSymbol(name);
-    if (hits[0] && !codeEl.value.trim()) codeEl.value = hits[0].code;
-  },
-
-  openModal(id=null) {
-    this.editId=id;
-    const isEdit=!!id;
-    document.getElementById('modalTitle').textContent   = isEdit?'取引を編集':'新規取引登録';
-    document.getElementById('modalSubmitBtn').textContent = isEdit?'更新する':'登録する';
-    if (isEdit) {
-      const t=this.trades.find(t=>t.id===id); if (!t) return;
-      document.getElementById('f-code').value    = t.symbolCode??'';
-      document.getElementById('f-name').value    = t.symbolName??'';
-      document.getElementById('f-date').value    = t.date??'';
-      document.getElementById('f-account').value = t.account??'特定';
-      document.getElementById('f-shares').value  = t.shares??'';
-      document.getElementById('f-price').value   = t.price??'';
-      document.getElementById('f-amount').value  = t.amount??'';
-      document.getElementById('f-note').value    = t.note??'';
-      document.getElementById('f-side').value    = t.side??'buy';
-      document.querySelectorAll('.side-btn').forEach(b=>b.classList.toggle('active',b.dataset.v===t.side));
-    } else {
-      document.getElementById('tradeForm').reset();
-      document.getElementById('f-date').value='';
-      document.getElementById('f-date').value=new Date().toISOString().slice(0,10);
-      document.getElementById('f-side').value='buy';
-      document.querySelectorAll('.side-btn').forEach((b,i)=>b.classList.toggle('active',i===0));
-      const a=document.getElementById('f-amount'); if(a) a._edited=false;
+    if (id) {
+      const h = this.holdings.find(h => h.id === id);
+      if (h) {
+        document.getElementById('m-code').value     = h.code;
+        document.getElementById('m-name').value     = h.name;
+        document.getElementById('m-shares').value   = h.shares;
+        document.getElementById('m-avg-cost').value = h.avgCost;
+        document.getElementById('m-memo').value     = h.memo ?? '';
+        document.getElementById('m-id').value       = h.id;
+        document.getElementById('m-account').value  = h.account;
+        document.querySelectorAll('#holding-modal .tab-btn').forEach(b => b.classList.toggle('active', b.dataset.val === h.account));
+      }
     }
-    const nm=document.getElementById('f-name'); if(nm) nm._auto=false;
-    document.querySelectorAll('.form-error').forEach(e=>e.textContent='');
-    document.querySelectorAll('.form-input').forEach(e=>e.classList.remove('error'));
-    document.getElementById('modalBackdrop').classList.add('open');
-    setTimeout(()=>document.getElementById('f-name')?.focus(),120);
+
+    overlay.classList.add('open');
+    setTimeout(() => document.getElementById('m-code').focus(), 50);
   },
 
-  closeModal() { document.getElementById('modalBackdrop').classList.remove('open'); this.editId=null; },
-
-  _validate() {
-    let ok=true;
-    [['f-name','err-name','銘柄名は必須です'],['f-date','err-date','日付は必須です'],['f-shares','err-shares','株数は必須です'],['f-amount','err-amount','受渡金額は必須です']].forEach(([id,eid,msg])=>{
-      const el=document.getElementById(id),er=document.getElementById(eid);
-      if (!el?.value.trim()){if(er)er.textContent=msg;el?.classList.add('error');ok=false;}
-    });
-    return ok;
+  closeModal() {
+    document.getElementById('modal-overlay').classList.remove('open');
+    document.getElementById('ac-list').classList.remove('open');
   },
 
-  _submitTrade() {
-    if (!this._validate()) return;
-    const rec={
-      id:         this.editId??Utils.uid(),
-      symbolCode: document.getElementById('f-code').value.trim(),
-      symbolName: document.getElementById('f-name').value.trim(),
-      date:       document.getElementById('f-date').value,
-      account:    document.getElementById('f-account').value,
-      side:       document.getElementById('f-side').value,
-      shares:     parseFloat(document.getElementById('f-shares').value)||0,
-      price:      parseFloat(document.getElementById('f-price').value)||0,
-      amount:     parseFloat(document.getElementById('f-amount').value)||0,
-      note:       document.getElementById('f-note').value.trim(),
-      source:     'manual',
-    };
-    if (this.editId) {
-      const i=this.trades.findIndex(t=>t.id===this.editId);
-      if (i>=0) this.trades[i]=rec;
-      Toast.show('取引を更新しました','success');
-    } else { this.trades.push(rec); Toast.show('取引を登録しました','success'); }
-    TradeStorage.save(this.trades);
+  saveHolding() {
+    const code    = document.getElementById('m-code').value.trim();
+    const name    = document.getElementById('m-name').value.trim();
+    const shares  = parseFloat(document.getElementById('m-shares').value);
+    const avgCost = parseFloat(document.getElementById('m-avg-cost').value);
+    const account = document.getElementById('m-account').value;
+    const memo    = document.getElementById('m-memo').value.trim();
+    const existId = document.getElementById('m-id').value;
+
+    if (!name)          { Toast.show('銘柄名を入力してください', 'error'); return; }
+    if (!shares || shares <= 0) { Toast.show('株数を正しく入力してください', 'error'); return; }
+    if (!avgCost || avgCost < 0) { Toast.show('取得単価を入力してください', 'error'); return; }
+
+    if (existId) {
+      const idx = this.holdings.findIndex(h => h.id === existId);
+      if (idx >= 0) {
+        this.holdings[idx] = { ...this.holdings[idx], code, name, shares, avgCost, account, memo, updatedAt: Date.now() };
+        Toast.show('更新しました', 'success');
+      }
+    } else {
+      this.holdings.push({ id: uid(), code, name, shares, avgCost, account, memo, addedAt: Date.now(), updatedAt: Date.now() });
+      Toast.show('追加しました', 'success');
+      // Fetch quote & dividends for new holding
+      if (code) {
+        this._fetchQuotes([code], false).then(() => this.renderPage());
+        this._fetchDividends([code]);
+      }
+    }
+
+    HoldingStorage.save(this.holdings);
+    Sync.push();
     this.closeModal();
-    if (this.page==='history') this._refreshHistory();
-    else if (this.page==='dashboard') this.renderDashboard();
+    this.renderPage();
   },
 
-  /* ============================================================
-     Helpers
-     ============================================================ */
-  _accBadge(acc) {
-    if (!acc) return '';
-    const cls = acc.startsWith('新NISA')?'badge-nnisa':acc==='NISA'?'badge-nisa':'badge-acct';
-    return `<span class="badge ${cls}">${acc}</span>`;
+  deleteHolding(id) {
+    if (!confirm('この銘柄を削除しますか？')) return;
+    this.holdings = this.holdings.filter(h => h.id !== id);
+    HoldingStorage.save(this.holdings);
+    Sync.push();
+    Toast.show('削除しました', 'info');
+    this.renderPage();
   },
-  esc(s) { return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); },
-  _empty(title, sub) {
-    return `<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/></svg><h3>${title}</h3><p>${sub}</p></div>`;
+
+  /* ===== Autocomplete ===== */
+  _onCodeInput() {
+    clearTimeout(this._acTimer);
+    const code = document.getElementById('m-code').value.trim();
+    if (code.length < 3) { document.getElementById('ac-list').classList.remove('open'); return; }
+    this._acTimer = setTimeout(async () => {
+      const results = await YahooFinance.searchSymbol(code);
+      this._showAc(results);
+    }, 400);
+  },
+
+  _onNameInput() {
+    clearTimeout(this._acTimer);
+    const name = document.getElementById('m-name').value.trim();
+    if (name.length < 2) { document.getElementById('ac-list').classList.remove('open'); return; }
+    this._acTimer = setTimeout(async () => {
+      const results = await YahooFinance.searchSymbol(name);
+      this._showAc(results);
+    }, 400);
+  },
+
+  _showAc(results) {
+    const list = document.getElementById('ac-list');
+    if (!results.length) { list.classList.remove('open'); return; }
+    list.innerHTML = results.slice(0, 6).map(r => `
+      <div class="ac-item" onclick="App._pickAc('${r.code}','${r.name.replace(/'/g,"\\'")}')">
+        ${r.name} <span class="ac-code">${r.code}</span>
+      </div>`).join('');
+    list.classList.add('open');
+  },
+
+  _pickAc(code, name) {
+    document.getElementById('m-code').value = code;
+    document.getElementById('m-name').value = name;
+    document.getElementById('ac-list').classList.remove('open');
+  },
+
+  /* ===== Data management ===== */
+  exportData() {
+    const json = JSON.stringify({ holdings: this.holdings, exportedAt: new Date().toISOString() }, null, 2);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+    a.download = `kabu_holdings_${new Date().toISOString().slice(0,10)}.json`;
+    a.click();
+  },
+
+  clearQuoteCache() {
+    HoldingStorage.saveQuotes({});
+    this.quotes = {};
+    YahooFinance.clearMemCache?.();
+    Toast.show('株価キャッシュを削除しました', 'info');
+  },
+
+  clearAll() {
+    if (!confirm('全ての保有銘柄データを削除しますか？この操作は元に戻せません。')) return;
+    this.holdings = [];
+    this.quotes   = {};
+    HoldingStorage.save([]);
+    HoldingStorage.saveQuotes({});
+    Sync.push();
+    Toast.show('全データを削除しました', 'info');
+    this.renderPage();
+  },
+
+  /* ===== Chart helpers ===== */
+  _destroyChart(key) {
+    if (this._charts[key]) { this._charts[key].destroy(); delete this._charts[key]; }
   },
 };
 
-/* ============================================================
-   Boot
-   ============================================================ */
 document.addEventListener('DOMContentLoaded', () => App.init());

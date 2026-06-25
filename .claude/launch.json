@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "株取引管理",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve", "-p", "3456", "-s", "."],
+      "port": 3456
+    }
+  ]
+}

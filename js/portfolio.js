@@ -1,163 +1,58 @@
 'use strict';
 
 const Portfolio = (() => {
-  const TAX   = 0.20315;
-  const NISA  = new Set(['NISA', '新NISA成長', '新NISA積立']);
-
-  /* 有効な銘柄コード（4桁数字）かチェック */
-  function isValidCode(code) { return /^\d{4}$/.test(String(code ?? '')); }
-
-  /* ===== 株式分割の自動反映 ===== */
-  // { code: [{date:'YYYY-MM-DD', factor:Number}] }  factor=10 なら 1→10分割
-  let SPLITS = {};
-  function setSplits(map) { SPLITS = map || {}; }
-
-  // 指定日「より後」に起きた分割の累積倍率（取引時の株数を現在基準へ換算）
-  function splitFactorAfter(code, date) {
-    const list = SPLITS[code];
-    if (!list || !list.length) return 1;
-    let f = 1;
-    for (const s of list) { if (s.date > date) f *= s.factor; }
-    return f;
+  function calc(h, quote) {
+    const price     = quote?.price ?? h.avgCost;
+    const cost      = h.avgCost * h.shares;
+    const value     = price * h.shares;
+    const pnl       = value - cost;
+    const pnlPct    = cost > 0 ? pnl / cost * 100 : 0;
+    const dayChg    = (quote?.change ?? 0) * h.shares;
+    const dayChgPct = quote?.changePct ?? 0;
+    return { ...h, price, cost, value, pnl, pnlPct, dayChg, dayChgPct };
   }
 
-  // 取引の株数を現在基準に補正（受渡金額＝総額は不変、単価のみ変わる）
-  function adjShares(t) {
-    const code = t.symbolCode || t.symbolName;
-    return t.shares * splitFactorAfter(code, t.date);
+  function calcAll(holdings, quotes) {
+    return holdings.map(h => calc(h, quotes[h.code] ?? null));
   }
 
-  /* 保有銘柄一覧（口座別に残株・コスト追跡） */
-  function getHoldings(trades) {
-    const lots = {}; // key: `${code}::${account}`
+  function summary(enriched) {
+    const totalValue = enriched.reduce((s, h) => s + h.value, 0);
+    const totalCost  = enriched.reduce((s, h) => s + h.cost,  0);
+    const pnl        = totalValue - totalCost;
+    const pnlPct     = totalCost > 0 ? pnl / totalCost * 100 : 0;
+    const dayChg     = enriched.reduce((s, h) => s + h.dayChg, 0);
+    return { totalValue, totalCost, pnl, pnlPct, dayChg };
+  }
 
-    [...trades]
-      .sort((a, b) => a.date.localeCompare(b.date))
-      .forEach(t => {
-        const code = t.symbolCode || t.symbolName;
-        const key  = `${code}::${t.account}`;
-        if (!lots[key]) lots[key] = {
-          symbolCode: t.symbolCode ?? '',
-          symbolName: t.symbolName ?? '',
-          account:    t.account ?? '特定',
-          shares: 0, totalCost: 0,
-        };
-        const h = lots[key];
-        const sh = adjShares(t);     // 分割補正後の株数
-        if (t.side === 'buy') {
-          h.shares    += sh;
-          h.totalCost += Math.abs(t.amount);
-        } else {
-          if (h.shares > 0) {
-            const ratio  = Math.min(sh / h.shares, 1);
-            h.totalCost -= h.totalCost * ratio;
-          }
-          h.shares = Math.max(0, h.shares - sh);
-        }
-      });
-
-    /* 銘柄単位に集約 */
-    const byCode = {};
-    Object.values(lots).filter(h => h.shares > 0.001).forEach(h => {
-      const code = h.symbolCode || h.symbolName;
-      if (!byCode[code]) byCode[code] = {
-        symbolCode: h.symbolCode,
-        symbolName: h.symbolName,
-        shares: 0, totalCost: 0,
-        accounts: [],
-      };
-      byCode[code].shares    += h.shares;
-      byCode[code].totalCost += h.totalCost;
-      byCode[code].accounts.push({ account: h.account, shares: h.shares, cost: h.totalCost });
+  function annualDividend(holdings, dividends, year, taxAfter = false) {
+    const TAX = 1 - 0.20315;
+    let total = 0;
+    const byStock = holdings.map(h => {
+      const divs     = dividends[h.code] ?? [];
+      const yearDivs = divs.filter(d => d.date.startsWith(String(year)));
+      const perShare = yearDivs.reduce((s, d) => s + d.amount, 0);
+      const gross    = perShare * h.shares;
+      const net      = gross * TAX;
+      const amount   = taxAfter ? net : gross;
+      total += amount;
+      return { code: h.code, name: h.name, shares: h.shares, account: h.account, perShare, gross, net, amount };
     });
-
-    return Object.values(byCode).map(h => ({
-      ...h,
-      avgCost:       h.shares > 0 ? h.totalCost / h.shares : 0,
-      hasValidCode:  isValidCode(h.symbolCode),
-    }));
+    return { total, byStock: byStock.filter(x => x.perShare > 0).sort((a, b) => b.amount - a.amount) };
   }
 
-  /* 指定日より前に保有していた株数（口座別） */
-  function sharesAtDateByAccount(trades, symbolCode, exDate) {
-    const acc = {};
-    [...trades]
-      .filter(t => (t.symbolCode === symbolCode || t.symbolName === symbolCode) && t.date < exDate)
-      .sort((a, b) => a.date.localeCompare(b.date))
-      .forEach(t => {
-        const a = t.account ?? '特定';
-        const sh = adjShares(t);
-        acc[a] = (acc[a] ?? 0) + (t.side === 'buy' ? sh : -sh);
+  function monthlyDividend(holdings, dividends, year, taxAfter = false) {
+    const TAX    = 1 - 0.20315;
+    const months = Array.from({ length: 12 }, () => 0);
+    holdings.forEach(h => {
+      (dividends[h.code] ?? []).filter(d => d.date.startsWith(String(year))).forEach(d => {
+        const m     = parseInt(d.date.slice(5, 7), 10) - 1;
+        const gross = d.amount * h.shares;
+        months[m]  += taxAfter ? gross * TAX : gross;
       });
-    return acc;
-  }
-
-  /* 配当受取額の計算（権利落ち日ベース・口座別課税） */
-  function calcDividendsReceived(trades, symbolCode, dividendHistory) {
-    return dividendHistory
-      .map(div => {
-        const accShares = sharesAtDateByAccount(trades, symbolCode, div.date);
-        let gross = 0, net = 0, totalShares = 0;
-        for (const [account, shares] of Object.entries(accShares)) {
-          if (shares <= 0) continue;
-          const tax     = NISA.has(account) ? 0 : TAX;
-          const amount  = shares * div.amount;
-          gross      += amount;
-          net        += amount * (1 - tax);
-          totalShares += shares;
-        }
-        return { ...div, gross, net, shares: totalShares, year: div.date.slice(0,4), month: div.date.slice(0,7) };
-      })
-      .filter(d => d.gross > 0);
-  }
-
-  /* 直近12ヶ月の年間配当/株（利回り計算用） */
-  function annualDivPerShare(dividendHistory) {
-    const now      = new Date().toISOString().slice(0, 10);
-    const oneYrAgo = new Date(); oneYrAgo.setFullYear(oneYrAgo.getFullYear() - 1);
-    const cutoff   = oneYrAgo.toISOString().slice(0, 10);
-    return dividendHistory
-      .filter(d => d.date >= cutoff && d.date <= now)
-      .reduce((s, d) => s + d.amount, 0);
-  }
-
-  /* 実現損益（FIFO方式・年度別） */
-  function getRealizedPnL(trades) {
-    const lots   = {};  // { code: [{shares, costPerShare}] }
-    const yearly = {};  // { year: { realized, buyAmt, sellAmt, taxEst } }
-
-    [...trades]
-      .sort((a, b) => a.date.localeCompare(b.date))
-      .forEach(t => {
-        const code = t.symbolCode || t.symbolName;
-        const year = t.date.slice(0, 4);
-        if (!yearly[year]) yearly[year] = { realized: 0, buyAmt: 0, sellAmt: 0 };
-        if (!lots[code])   lots[code]   = [];
-
-        if (t.side === 'buy') {
-          const sh = adjShares(t);
-          lots[code].push({ shares: sh, costPerShare: Math.abs(t.amount) / sh });
-          yearly[year].buyAmt += Math.abs(t.amount);
-        } else {
-          let remaining = adjShares(t), costBasis = 0;
-          while (remaining > 0.001 && lots[code].length > 0) {
-            const lot  = lots[code][0];
-            const used = Math.min(remaining, lot.shares);
-            costBasis   += used * lot.costPerShare;
-            lot.shares  -= used;
-            remaining   -= used;
-            if (lot.shares < 0.001) lots[code].shift();
-          }
-          yearly[year].realized  += Math.abs(t.amount) - costBasis;
-          yearly[year].sellAmt   += Math.abs(t.amount);
-        }
-      });
-
-    Object.values(yearly).forEach(y => {
-      y.taxEst = y.realized > 0 ? y.realized * TAX : 0;
     });
-    return yearly;
+    return months;
   }
 
-  return { getHoldings, calcDividendsReceived, annualDivPerShare, getRealizedPnL, isValidCode, setSplits };
+  return { calc, calcAll, summary, annualDividend, monthlyDividend };
 })();

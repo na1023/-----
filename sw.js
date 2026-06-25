@@ -1,4 +1,4 @@
-const CACHE = 'kabu-v13';
+const CACHE = 'kabu-v14';
 const ASSETS = [
   './index.html',
   './style.css',

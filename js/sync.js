@@ -1,17 +1,11 @@
 'use strict';
 
-/* ============================================================
-   Sync — Firebase Authentication + Firestore
-   各ユーザーがログインし、自分専用のデータをクラウドに保存・同期する。
-   ログイン方法： Googleアカウント / メール+パスワード
-   保存先： portfolios/{uid}
-   ============================================================ */
 const Sync = {
   db:     null,
   auth:   null,
   user:   null,
   unsub:  null,
-  status: 'off',   // 'unconfigured' | 'signedout' | 'on' | 'error'
+  status: 'off',
   _t:     null,
 
   _configured() {
@@ -34,7 +28,6 @@ const Sync = {
       return;
     }
 
-    // リダイレクト方式ログインの戻り処理
     this.auth.getRedirectResult().catch(e => console.error(e));
 
     this.auth.onAuthStateChanged(user => {
@@ -42,44 +35,27 @@ const Sync = {
         this.user = user;
         this._startSync();
       } else {
-        this.user = null;
+        this.user   = null;
         this.status = 'signedout';
         if (this.unsub) { this.unsub(); this.unsub = null; }
-        this._refreshSettings();
+        if (App.page === 'settings') App.renderSettings();
       }
     });
   },
 
-  /* ---- ログイン操作 ---- */
   async loginGoogle() {
     if (!this.auth) return;
-
-    // file:// やストレージ無効の環境では Google ログイン不可
     if (location.protocol !== 'http:' && location.protocol !== 'https:') {
-      Toast.show('この開き方ではGoogleログインを使えません。https のURL（GitHub Pages）で開いてください。', 'error', 6000);
-      return;
+      Toast.show('https URL で開いてください', 'error'); return;
     }
-
     const provider = new firebase.auth.GoogleAuthProvider();
     provider.setCustomParameters({ prompt: 'select_account' });
-
-    // iOS Safari ではリダイレクト方式が完了できない不具合があるため、
-    // 全環境でポップアップ方式を優先する（クリック直後なのでブロックされにくい）
     try {
       await this.auth.signInWithPopup(provider);
     } catch (e) {
-      console.error(e);
-      if (e.code === 'auth/popup-blocked') {
-        Toast.show('ポップアップがブロックされました。ブラウザ設定で「ポップアップを許可」してから、もう一度お試しください。', 'error', 7000);
-      } else if (e.code === 'auth/popup-closed-by-user' || e.code === 'auth/cancelled-popup-request') {
-        // ユーザーが閉じた／連打しただけ。何も表示しない
-      } else if (e.code === 'auth/operation-not-supported-in-this-environment') {
-        Toast.show('この環境ではGoogleログインを使えません。通常のブラウザ(Safari/Chrome)の https URL で開くか、メール＋パスワードをご利用ください。', 'error', 7000);
-      } else if (e.code === 'auth/unauthorized-domain') {
-        Toast.show('このドメインが未許可です。Firebaseの「承認済みドメイン」にサイトのドメインを追加してください。', 'error', 7000);
-      } else {
-        Toast.show('Googleログインに失敗しました: ' + (e.code || e.message), 'error', 6000);
-      }
+      if (e.code === 'auth/popup-blocked') Toast.show('ポップアップをブラウザで許可してください', 'error', 6000);
+      else if (e.code === 'auth/popup-closed-by-user' || e.code === 'auth/cancelled-popup-request') { /* no-op */ }
+      else Toast.show('Googleログイン失敗: ' + (e.code || e.message), 'error', 6000);
     }
   },
 
@@ -94,32 +70,32 @@ const Sync = {
   },
 
   async logout() {
-    try { await this.auth.signOut(); Toast.show('ログアウトしました（端末内のデータは残ります）', 'info'); }
+    try { await this.auth.signOut(); Toast.show('ログアウトしました', 'info'); }
     catch (e) { console.error(e); }
   },
 
   _authError(e) {
-    const msg = {
+    const map = {
       'auth/invalid-email':        'メールアドレスの形式が正しくありません',
-      'auth/email-already-in-use': 'このメールアドレスは既に登録済みです。ログインしてください',
+      'auth/email-already-in-use': 'このメールは既に登録済みです',
       'auth/weak-password':        'パスワードは6文字以上にしてください',
       'auth/wrong-password':       'パスワードが違います',
-      'auth/user-not-found':       'アカウントが見つかりません。新規登録してください',
+      'auth/user-not-found':       'アカウントが見つかりません',
       'auth/invalid-credential':   'メールアドレスまたはパスワードが違います',
-    }[e.code] || ('エラー: ' + (e.code || e.message));
-    Toast.show(msg, 'error', 5000);
+    };
+    Toast.show(map[e.code] || 'エラー: ' + (e.code || e.message), 'error', 5000);
   },
 
-  /* ---- 同期 ---- */
   _docRef() { return this.db.collection('portfolios').doc(this.user.uid); },
 
-  _key(t) { return t.id || (typeof deduplicateKey === 'function' ? deduplicateKey(t) : JSON.stringify(t)); },
-
-  _merge(a, b) {
+  _merge(local, remote) {
     const map = new Map();
-    [...(a || []), ...(b || [])].forEach(t => {
-      const k = this._key(t);
-      if (!map.has(k)) map.set(k, t);
+    [...(local || []), ...(remote || [])].forEach(h => {
+      if (!map.has(h.id)) map.set(h.id, h);
+      else {
+        const a = map.get(h.id), b = h;
+        map.set(h.id, (b.updatedAt ?? 0) > (a.updatedAt ?? 0) ? b : a);
+      }
     });
     return [...map.values()];
   },
@@ -128,43 +104,39 @@ const Sync = {
     const ref = this._docRef();
     try {
       const snap   = await ref.get();
-      const remote = (snap.exists && snap.data().trades) ? snap.data().trades : [];
-      const merged = this._merge(App.trades, remote);
-      App.trades = merged;
-      TradeStorage.saveLocal(merged);
-      await ref.set({ trades: merged, updatedAt: Date.now() });
+      const remote = snap.exists ? (snap.data().holdings ?? []) : [];
+      const merged = this._merge(App.holdings, remote);
+      App.holdings = merged;
+      HoldingStorage.save(merged);
+      await ref.set({ holdings: merged, updatedAt: Date.now() });
     } catch (e) {
       console.error(e);
       this.status = 'error';
-      this._refreshSettings();
+      if (App.page === 'settings') App.renderSettings();
       return;
     }
 
     if (this.unsub) this.unsub();
     this.unsub = ref.onSnapshot(snap => {
       if (!snap.exists) return;
-      const remote = snap.data().trades || [];
-      if (JSON.stringify(remote) !== JSON.stringify(App.trades)) {
-        App.trades = remote;
-        TradeStorage.saveLocal(remote);
-        App.navigate(App.page);
+      const remote = snap.data().holdings ?? [];
+      if (JSON.stringify(remote) !== JSON.stringify(App.holdings)) {
+        App.holdings = remote;
+        HoldingStorage.save(remote);
+        App.navigate(App.page, false);
       }
-    }, err => { console.error(err); this.status = 'error'; this._refreshSettings(); });
+    }, err => { console.error(err); this.status = 'error'; });
 
     this.status = 'on';
-    App.navigate(App.page);
-    this._refreshSettings();
+    App.navigate(App.page, false);
+    if (App.page === 'settings') App.renderSettings();
   },
 
   push() {
     if (this.status !== 'on' || !this.user || !this.db) return;
     clearTimeout(this._t);
     this._t = setTimeout(() => {
-      this._docRef().set({ trades: App.trades, updatedAt: Date.now() }).catch(e => console.error(e));
+      this._docRef().set({ holdings: App.holdings, updatedAt: Date.now() }).catch(e => console.error(e));
     }, 600);
-  },
-
-  _refreshSettings() {
-    if (App.page === 'settings') App.renderSettings();
   },
 };
