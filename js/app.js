@@ -60,6 +60,7 @@ const App = {
   taxAfter: false,
   holdFilter: 'all',
   brokerFilter: 'all',
+  holdView: 'broker',    // 'broker' = 証券会社別 | 'merged' = 銘柄別合算
   _charts: {},
   _editId: null,
   _acTimer: null,
@@ -478,6 +479,27 @@ const App = {
   setBrokerFilter(b) { this.brokerFilter = b;  this.renderHoldings(); },
 
   /* ===== CSV Import ===== */
+  // エンコーディング自動判定：UTF-8 BOM → UTF-8、それ以外 → Shift_JIS を試みる
+  _readCsvFile(file, callback) {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const bytes = new Uint8Array(e.target.result);
+      // UTF-8 BOM (EF BB BF) の確認
+      const hasBom = bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF;
+      let text;
+      if (hasBom) {
+        text = new TextDecoder('utf-8').decode(bytes);
+      } else {
+        // Shift_JIS で試す → 文字化け(U+FFFD)が多ければ UTF-8 にフォールバック
+        const sjis = new TextDecoder('shift-jis', { fatal: false }).decode(bytes);
+        const bad  = (sjis.match(/�/g) || []).length;
+        text = bad > 3 ? new TextDecoder('utf-8', { fatal: false }).decode(bytes) : sjis;
+      }
+      callback(text.replace(/^﻿/, '')); // BOM文字除去
+    };
+    reader.readAsArrayBuffer(file);
+  },
+
   triggerCsvImport() {
     const input = document.createElement('input');
     input.type = 'file';
@@ -485,9 +507,7 @@ const App = {
     input.addEventListener('change', e => {
       const file = e.target.files[0];
       if (!file) return;
-      const reader = new FileReader();
-      reader.onload = ev => this._parseCsvHoldings(ev.target.result, file.name);
-      reader.readAsText(file, 'Shift_JIS');
+      this._readCsvFile(file, text => this._parseCsvHoldings(text, file.name));
     });
     input.click();
   },
@@ -552,11 +572,24 @@ const App = {
   },
 
   _detectBroker(text, filename) {
-    const t = text.slice(0, 500) + (filename || '');
-    if (/SBI|sbi|エスビーアイ/i.test(t) || /預り区分|株式（特定|株式（一般|株式（NISA/.test(t)) return 'SBI';
-    if (/楽天証券|rakuten/i.test(t) || /お預り/.test(t)) return '楽天';
-    if (/松井証券|matsui/i.test(t) || /建玉/.test(t)) return '松井';
-    if (/マネックス|monex/i.test(t)) return 'マネックス';
+    const head = text.slice(0, 1000);
+    const fn   = (filename || '').toLowerCase();
+    // SBI: 預り区分列、またはファイル名/内容に SBI
+    if (/SBI|エスビーアイ/i.test(head) || /預り区分|株式（特定|株式（一般|株式（NISA/.test(head)) return 'SBI';
+    if (/sbi/.test(fn)) return 'SBI';
+    // 楽天: 内容・ファイル名・受渡日+証券コード構造
+    if (/楽天証券|楽天ブランド|楽天証|RAKUTEN/i.test(head)) return '楽天';
+    if (/rakuten|rakutenbank/.test(fn)) return '楽天';
+    // 楽天のCSVは「受渡日」「証券コード」「平均取得単価」の組み合わせが特徴的
+    if (/受渡日/.test(head) && /証券コード/.test(head)) return '楽天';
+    // 受渡日があれば楽天の可能性が高い（SBIにはない）
+    if (/受渡日/.test(head) && /平均取得単価/.test(head)) return '楽天';
+    // 松井
+    if (/松井証券|MATSUI/i.test(head) || /matsui/.test(fn) || /建玉/.test(head)) return '松井';
+    // マネックス
+    if (/マネックス|MONEX/i.test(head) || /monex/.test(fn)) return 'マネックス';
+    // 列名から推測（汎用フォールバック前に試みる）
+    if (/証券コード/.test(head)) return '楽天'; // 証券コードは楽天固有
     return '汎用';
   },
 
@@ -588,7 +621,10 @@ const App = {
     return result;
   },
 
-  /* 楽天証券 保有株式一覧CSV */
+  /* 楽天証券 保有株式一覧CSV
+     代表的な形式:
+       受渡日,証券コード,銘柄名,市場,口座,保有数量,平均取得単価(円),時価(円),評価損益(円),評価損益率(%)
+  */
   _parseRakuten(lines) {
     let headerIdx = -1;
     let codeCol = -1, nameCol = -1, sharesCol = -1, costCol = -1, accountCol = -1;
@@ -596,19 +632,25 @@ const App = {
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      if (headerIdx < 0 && /銘柄コード|コード|証券コード/.test(line)) {
+      if (headerIdx < 0) {
+        // 銘柄コード / 証券コード を含む行をヘッダーとして認識
+        if (!/銘柄コード|証券コード|コード/.test(line)) continue;
         const cols = this._splitCsv(line);
-        codeCol    = cols.findIndex(c => /銘柄コード|コード|証券コード/.test(c));
-        nameCol    = cols.findIndex(c => /銘柄名|銘柄/.test(c) && !/コード/.test(c));
+        codeCol    = cols.findIndex(c => /銘柄コード|証券コード/.test(c) || (c.trim() === 'コード'));
+        nameCol    = cols.findIndex(c => /銘柄名/.test(c));
+        // 保有数量 / 数量 / 株数
         sharesCol  = cols.findIndex(c => /保有数量|数量|株数/.test(c));
+        // 平均取得単価 (円) など括弧付きも対応
         costCol    = cols.findIndex(c => /平均取得単価|取得単価|平均単価/.test(c));
-        accountCol = cols.findIndex(c => /口座|預り区分/.test(c));
-        if (codeCol >= 0 && sharesCol >= 0) headerIdx = i;
+        // 口座 / 口座区分
+        accountCol = cols.findIndex(c => /^口座$|口座区分|口座種別/.test(c));
+        if (codeCol >= 0 && sharesCol >= 0) { headerIdx = i; }
         continue;
       }
-      if (headerIdx < 0) continue;
-      const cols   = this._splitCsv(line);
-      const accRaw = accountCol >= 0 ? cols[accountCol] ?? '' : '';
+      const line2 = lines[i];
+      if (!line2.trim()) continue;
+      const cols   = this._splitCsv(line2);
+      const accRaw = accountCol >= 0 ? (cols[accountCol] ?? '') : '';
       const account = /NISA|成長|積立/.test(accRaw) ? 'NISA' : /一般/.test(accRaw) ? '一般' : '特定';
       const h = this._extractHolding(cols, codeCol, nameCol, sharesCol, costCol, account);
       if (h) result.push(h);
@@ -826,18 +868,13 @@ const App = {
     input.type = 'file'; input.accept = '.csv,text/csv';
     input.onchange = e => {
       const file = e.target.files[0]; if (!file) return;
-      const reader = new FileReader();
-      reader.onload = ev => this._parseDivCsv(ev.target.result, file.name);
-      reader.onerror = () => Toast.show('ファイル読み込みエラー', 'error');
-      // Shift_JIS対応
-      reader.readAsText(file, 'Shift_JIS');
+      this._readCsvFile(file, text => this._parseDivCsv(text, file.name));
     };
     input.click();
   },
 
   _parseDivCsv(rawText, filename) {
-    // UTF-8フォールバック（文字化けを検知）
-    const text = rawText.includes('�') ? rawText : rawText;
+    const text = rawText;
     const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
     if (!lines.length) { Toast.show('CSVが空です', 'error'); return; }
 
