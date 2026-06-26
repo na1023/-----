@@ -80,11 +80,15 @@ const App = {
     ['sidebarAddBtn', 'topbarAddBtn'].forEach(id =>
       document.getElementById(id)?.addEventListener('click', () => this.openModal()));
 
-    // Modal
+    // Holding Modal
     document.getElementById('modal-close').addEventListener('click',  () => this.closeModal());
     document.getElementById('modal-cancel').addEventListener('click', () => this.closeModal());
     document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') this.closeModal(); });
     document.getElementById('modal-save').addEventListener('click', () => this.saveHolding());
+
+    // CSV Import Modal
+    document.getElementById('csv-modal-close').addEventListener('click', () => this._closeCsvModal());
+    document.getElementById('csv-modal-overlay').addEventListener('click', e => { if (e.target.id === 'csv-modal-overlay') this._closeCsvModal(); });
 
     // Account tabs in modal
     document.querySelectorAll('#holding-modal .tab-btn').forEach(btn =>
@@ -682,84 +686,182 @@ const App = {
     reader.readAsArrayBuffer(file);
   },
 
+  /* ===== CSV Import (モーダルフロー) ===== */
+  _csvState: { broker: null, brokerName: null, parsed: [] },
+
   triggerCsvImport() {
+    this._csvState = { broker: null, brokerName: null, parsed: [] };
+    this._openCsvModal();
+  },
+
+  _openCsvModal() {
+    document.getElementById('csv-modal-overlay').classList.add('open');
+    this._csvShowStep1();
+  },
+
+  _closeCsvModal() {
+    document.getElementById('csv-modal-overlay').classList.remove('open');
+  },
+
+  _csvShowStep1() {
+    document.getElementById('csv-modal-title').textContent = '① 証券会社を選択';
+    const brokers = [
+      { key: 'SBI',        label: 'SBI証券',      cls: 'sbi'     },
+      { key: '楽天',       label: '楽天証券',      cls: 'rakuten' },
+      { key: '松井',       label: '松井証券',      cls: 'matsui'  },
+      { key: 'マネックス', label: 'マネックス証券', cls: 'monex'  },
+      { key: '汎用',       label: 'その他',         cls: 'other'  },
+    ];
+    document.getElementById('csv-modal-body').innerHTML = `
+      <p style="font-size:.875rem;color:var(--text-2);margin-bottom:16px">
+        取り込むCSVの証券会社を選んでください。選択後にファイル選択画面が開きます。
+      </p>
+      <div class="csv-broker-grid">
+        ${brokers.map(b => `
+          <button class="csv-broker-btn" onclick="App._csvSelectBroker('${b.key}','${b.label}')">
+            <span class="broker-dot broker-dot-${b.cls}" style="width:10px;height:10px"></span>
+            ${b.label}
+          </button>`).join('')}
+      </div>
+      <div class="modal-footer" style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+        <button class="btn-ghost" onclick="App._closeCsvModal()">キャンセル</button>
+      </div>
+    `;
+  },
+
+  _csvSelectBroker(key, label) {
+    this._csvState.broker     = key;
+    this._csvState.brokerName = label;
+    // ファイル選択を開く
     const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.csv';
+    input.type = 'file'; input.accept = '.csv';
     input.addEventListener('change', e => {
       const file = e.target.files[0];
       if (!file) return;
-      this._readCsvFile(file, text => this._parseCsvHoldings(text, file.name));
+      this._readCsvFile(file, text => this._csvParseAndPreview(text, file.name));
     });
     input.click();
   },
 
-  _parseCsvHoldings(rawText, filename) {
-    const text  = rawText;
-    const lines = text.split(/\r?\n/);
+  _csvParseAndPreview(rawText, filename) {
+    const lines = rawText.split(/\r?\n/);
+    const key   = this._csvState.broker;
+    let parsed  = [];
+    try {
+      if (key === 'SBI')        parsed = this._parseSBI(lines);
+      else if (key === '楽天')  parsed = this._parseRakuten(lines);
+      else if (key === '松井')  parsed = this._parseMatsui(lines);
+      else if (key === 'マネックス') parsed = this._parseMonex(lines);
+      else                      parsed = this._parseGeneric(lines);
+    } catch { parsed = []; }
 
-    // Step1: まず _detectBroker で判定
-    const detected = this._detectBroker(text, filename);
-
-    // Step2: 検出結果のパーサーを最初に試す
-    const tryParse = key => {
-      try {
-        if (key === 'SBI')        return this._parseSBI(lines);
-        if (key === '楽天')       return this._parseRakuten(lines);
-        if (key === '松井')       return this._parseMatsui(lines);
-        if (key === 'マネックス') return this._parseMonex(lines);
-        return this._parseGeneric(lines);
-      } catch { return []; }
-    };
-
-    let parsed = tryParse(detected);
-    let broker = detected;
-
-    // Step3: 検出パーサーで0件 or avgCost が全て0 → 他を全て試して最良を採用
-    const isUsable = rows => rows.length > 0 && rows.some(h => h.avgCost > 0 || h.name !== h.code);
-    if (!isUsable(parsed)) {
-      const order = ['SBI', '楽天', '松井', 'マネックス', '汎用'].filter(k => k !== detected);
-      for (const key of order) {
-        const rows = tryParse(key);
-        if (isUsable(rows)) { parsed = rows; broker = key; break; }
-      }
-      // 全て avgCost=0 でも行数があれば採用
-      if (!parsed.length) {
-        for (const key of ['SBI', '楽天', '松井', 'マネックス', '汎用']) {
-          const rows = tryParse(key);
-          if (rows.length > parsed.length) { parsed = rows; broker = key; }
-        }
-      }
+    // パースできなかった場合は汎用で再試行
+    if (!parsed.length && key !== '汎用') {
+      try { parsed = this._parseGeneric(lines); } catch { parsed = []; }
     }
 
     if (!parsed.length) {
-      Toast.show('有効な銘柄が見つかりませんでした。SBI・楽天・松井・マネックスの保有一覧CSVに対応', 'error', 6000);
+      document.getElementById('csv-modal-body').innerHTML = `
+        <div style="text-align:center;padding:24px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="var(--loss)" stroke-width="2" width="40" height="40" style="margin-bottom:12px"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          <p style="font-weight:600;margin-bottom:8px">銘柄が見つかりませんでした</p>
+          <p style="font-size:.875rem;color:var(--text-2);margin-bottom:20px">
+            ${this._csvState.brokerName}の保有一覧CSVか確認してください
+          </p>
+          <button class="btn-ghost" onclick="App._csvShowStep1()">← 証券会社を選び直す</button>
+        </div>
+      `;
       return;
     }
 
-    const preview = parsed.slice(0, 5).map(h => `${h.code} ${h.name}  ${h.shares}株 @${h.avgCost || '—'}円 [${h.account}]`).join('\n');
-    const more = parsed.length > 5 ? `\n…他 ${parsed.length - 5}件` : '';
-    const mode = confirm(
-      `【${broker}】${parsed.length}件を検出:\n\n${preview}${more}\n\nOK = 既存に追加\nキャンセル = 全て置き換え`
-    ) ? 'append' : 'replace';
+    this._csvState.parsed = parsed;
+    this._csvShowStep2();
+  },
+
+  _csvShowStep2() {
+    const { brokerName, parsed } = this._csvState;
+    document.getElementById('csv-modal-title').textContent = `② 取込内容を確認`;
+
+    const previewRows = parsed.slice(0, 8);
+    const remaining   = parsed.length - previewRows.length;
+
+    document.getElementById('csv-modal-body').innerHTML = `
+      <div class="csv-summary-bar">
+        <span class="broker-dot broker-dot-${this._brokerKey(brokerName)}" style="width:10px;height:10px"></span>
+        <strong>${brokerName}</strong>
+        <span style="margin-left:8px;color:var(--text-2)">${parsed.length}件を検出</span>
+      </div>
+
+      <div class="csv-preview-table">
+        <table>
+          <thead><tr><th>コード</th><th>銘柄名</th><th class="num">株数</th><th class="num">取得単価</th><th>口座</th></tr></thead>
+          <tbody>
+            ${previewRows.map(h => `<tr>
+              <td style="color:var(--text-3);font-size:.8rem">${h.code}</td>
+              <td style="font-weight:600">${h.name || h.code}</td>
+              <td class="num">${num(h.shares)}</td>
+              <td class="num">${h.avgCost > 0 ? yen(h.avgCost, 1) : '<span style="color:var(--text-3)">—</span>'}</td>
+              <td><span class="account-badge ${h.account}">${h.account}</span></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+        ${remaining > 0 ? `<p style="font-size:.8125rem;color:var(--text-3);text-align:center;padding:8px">…他 ${remaining}件</p>` : ''}
+      </div>
+
+      <div style="margin-top:16px">
+        <p style="font-size:.875rem;font-weight:600;margin-bottom:10px">取込み方法を選択してください</p>
+        <div class="csv-mode-btns">
+          <button class="csv-mode-btn" onclick="App._csvExecute('append')">
+            <div class="csv-mode-icon" style="background:#eff6ff;color:var(--primary)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </div>
+            <div class="csv-mode-label">追加・更新</div>
+            <div class="csv-mode-desc">既存に追加。同じ銘柄は株数・単価を更新</div>
+          </button>
+          <button class="csv-mode-btn" onclick="App._csvExecute('overwrite')">
+            <div class="csv-mode-icon" style="background:#fef3c7;color:#d97706">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
+            </div>
+            <div class="csv-mode-label">${brokerName}を上書き</div>
+            <div class="csv-mode-desc">この証券会社の既存データだけ置き換える</div>
+          </button>
+          <button class="csv-mode-btn danger" onclick="App._csvExecute('replace')">
+            <div class="csv-mode-icon" style="background:var(--loss-bg);color:var(--loss)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>
+            </div>
+            <div class="csv-mode-label">全データ置き換え</div>
+            <div class="csv-mode-desc">全証券会社のデータを削除してこのCSVだけにする</div>
+          </button>
+        </div>
+      </div>
+
+      <div class="modal-footer" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+        <button class="btn-ghost" onclick="App._csvShowStep1()">← 証券会社を選び直す</button>
+      </div>
+    `;
+  },
+
+  _csvExecute(mode) {
+    const { brokerName, parsed } = this._csvState;
 
     if (mode === 'replace') {
-      if (!confirm('既存の保有銘柄を全て削除して置き換えますか？')) return;
       this.holdings = [];
+    } else if (mode === 'overwrite') {
+      this.holdings = this.holdings.filter(h => (h.broker || 'その他') !== brokerName);
     }
 
-    // ブローカー名マッピング
-    const brokerName = { 'SBI':'SBI証券', '楽天':'楽天証券', '松井':'松井証券', 'マネックス':'マネックス証券', '汎用':'その他' }[broker] ?? 'その他';
-
-    let added = 0;
+    let added = 0, updated = 0;
     parsed.forEach(h => {
-      const exists = this.holdings.find(x => x.code === h.code && x.account === h.account && (x.broker||'その他') === brokerName);
+      const exists = mode === 'append'
+        ? this.holdings.find(x => x.code === h.code && x.account === h.account && (x.broker || 'その他') === brokerName)
+        : null; // overwrite/replace は全て新規追加
       if (exists) {
         exists.shares    = h.shares;
         exists.avgCost   = h.avgCost;
         exists.name      = h.name || exists.name;
         exists.broker    = brokerName;
         exists.updatedAt = Date.now();
+        updated++;
       } else {
         this.holdings.push({ id: uid(), ...h, broker: brokerName, memo: '', addedAt: Date.now(), updatedAt: Date.now() });
         added++;
@@ -768,7 +870,8 @@ const App = {
 
     HoldingStorage.save(this.holdings);
     Sync.push();
-    Toast.show(`インポート完了：新規${added}件・更新${parsed.length - added}件`, 'success', 5000);
+    this._closeCsvModal();
+    Toast.show(`取込完了：新規${added}件・更新${updated}件`, 'success', 5000);
 
     const codes = [...new Set(parsed.map(h => h.code))];
     this._fetchQuotes(codes, false).then(() => { this._fixMissingNames(); this.renderPage(); });
