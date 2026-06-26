@@ -746,14 +746,19 @@ const App = {
   _csvParseAndPreview(rawText, filename) {
     const lines = rawText.split(/\r?\n/);
     const key   = this._csvState.broker;
+
+    // raw先頭3行を保存（デバッグ用・パーサー前に確保）
+    this._csvState._rawLines = lines.slice(0, 5).filter(l => l.trim());
+
     let parsed  = [];
+    let parseError = null;
     try {
       if (key === 'SBI')        parsed = this._parseSBI(lines);
       else if (key === '楽天')  parsed = this._parseRakuten(lines);
       else if (key === '松井')  parsed = this._parseMatsui(lines);
       else if (key === 'マネックス') parsed = this._parseMonex(lines);
       else                      parsed = this._parseGeneric(lines);
-    } catch { parsed = []; }
+    } catch(e) { parsed = []; parseError = String(e); }
 
     // パースできなかった場合は汎用で再試行
     if (!parsed.length && key !== '汎用') {
@@ -785,22 +790,22 @@ const App = {
     const previewRows = parsed.slice(0, 8);
     const remaining   = parsed.length - previewRows.length;
 
-    // デバッグパネル（楽天証券で列が取得できていない場合に表示）
-    const hasNameIssue = parsed.some(h => h.name === h.code);
-    const hasCostIssue = parsed.every(h => h.avgCost === 0);
-    const debugHtml = (_debug && (hasNameIssue || hasCostIssue)) ? `
+    // デバッグパネル（常時表示・折りたたみ）
+    const rawPreview = (this._csvState._rawLines || []).map(l =>
+      `<div style="font-family:monospace;font-size:.7rem;word-break:break-all;padding:2px 0;border-bottom:1px solid var(--border)">${l.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</div>`
+    ).join('');
+    const colInfo = _debug
+      ? `コード[${_debug.codeCol}] 銘柄名[${_debug.nameCol}] 株数[${_debug.sharesCol}] 取得単価[${_debug.costCol}] 口座[${_debug.accountCol}]`
+      : '（パーサーがエラーで汎用フォールバック中）';
+    const debugHtml = `
       <details style="margin-bottom:12px;font-size:.8rem;background:var(--bg-2);border:1px solid var(--border);border-radius:8px;padding:8px 12px">
-        <summary style="cursor:pointer;font-weight:600;color:var(--text-2)">⚠️ 列検出の詳細（開発者向け）</summary>
-        <div style="margin-top:8px;overflow-x:auto">
-          <table style="font-size:.75rem;border-collapse:collapse;width:100%">
-            <thead><tr>${_debug.headerCols.map((c,i) => `<th style="border:1px solid var(--border);padding:3px 6px;background:var(--bg-3);white-space:nowrap">[${i}]<br>${c||'(空)'}</th>`).join('')}</tr></thead>
-            <tbody><tr>${_debug.firstDataRow.map(v => `<td style="border:1px solid var(--border);padding:3px 6px;white-space:nowrap">${v||'(空)'}</td>`).join('')}</tr></tbody>
-          </table>
-          <p style="margin-top:6px;color:var(--text-3)">
-            コード[${_debug.codeCol}] 銘柄名[${_debug.nameCol}] 株数[${_debug.sharesCol}] 取得単価[${_debug.costCol}] 口座[${_debug.accountCol}]
-          </p>
+        <summary style="cursor:pointer;font-weight:600;color:var(--text-2)">🔍 CSVデバッグ情報（クリックで展開）</summary>
+        <div style="margin-top:8px">
+          <p style="color:var(--text-3);margin-bottom:4px">先頭5行：</p>
+          ${rawPreview}
+          <p style="margin-top:8px;color:var(--text-3)">${colInfo}</p>
         </div>
-      </details>` : '';
+      </details>`;
 
     document.getElementById('csv-modal-body').innerHTML = `
       <div class="csv-summary-bar">
