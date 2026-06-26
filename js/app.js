@@ -698,29 +698,39 @@ const App = {
     const text  = rawText;
     const lines = text.split(/\r?\n/);
 
-    // 全パーサーを試しスコアで最良を選ぶ
-    const candidates = [
-      { key: 'SBI',        fn: () => this._parseSBI(lines)      },
-      { key: '楽天',       fn: () => this._parseRakuten(lines)   },
-      { key: '松井',       fn: () => this._parseMatsui(lines)    },
-      { key: 'マネックス', fn: () => this._parseMonex(lines)     },
-      { key: '汎用',       fn: () => this._parseGeneric(lines)   },
-    ];
-    const tried = candidates.map(c => {
-      try { return { key: c.key, rows: c.fn() }; } catch { return { key: c.key, rows: [] }; }
-    });
-    // スコア: 総行数 + avgCost>0 ボーナス + 名前≠コード ボーナス
-    const score = r =>
-      r.rows.length * 10
-      + r.rows.filter(h => h.avgCost > 0).length * 5
-      + r.rows.filter(h => h.name && h.name !== h.code).length * 3;
-    tried.sort((a, b) => score(b) - score(a));
-
-    const best   = tried[0];
-    const parsed = best.rows;
-    // detected broker をヒントに使い、最良パーサーが汎用なら検出値を優先
+    // Step1: まず _detectBroker で判定
     const detected = this._detectBroker(text, filename);
-    const broker   = score(best) > 0 ? best.key : detected;
+
+    // Step2: 検出結果のパーサーを最初に試す
+    const tryParse = key => {
+      try {
+        if (key === 'SBI')        return this._parseSBI(lines);
+        if (key === '楽天')       return this._parseRakuten(lines);
+        if (key === '松井')       return this._parseMatsui(lines);
+        if (key === 'マネックス') return this._parseMonex(lines);
+        return this._parseGeneric(lines);
+      } catch { return []; }
+    };
+
+    let parsed = tryParse(detected);
+    let broker = detected;
+
+    // Step3: 検出パーサーで0件 or avgCost が全て0 → 他を全て試して最良を採用
+    const isUsable = rows => rows.length > 0 && rows.some(h => h.avgCost > 0 || h.name !== h.code);
+    if (!isUsable(parsed)) {
+      const order = ['SBI', '楽天', '松井', 'マネックス', '汎用'].filter(k => k !== detected);
+      for (const key of order) {
+        const rows = tryParse(key);
+        if (isUsable(rows)) { parsed = rows; broker = key; break; }
+      }
+      // 全て avgCost=0 でも行数があれば採用
+      if (!parsed.length) {
+        for (const key of ['SBI', '楽天', '松井', 'マネックス', '汎用']) {
+          const rows = tryParse(key);
+          if (rows.length > parsed.length) { parsed = rows; broker = key; }
+        }
+      }
+    }
 
     if (!parsed.length) {
       Toast.show('有効な銘柄が見つかりませんでした。SBI・楽天・松井・マネックスの保有一覧CSVに対応', 'error', 6000);
