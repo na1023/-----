@@ -978,8 +978,8 @@ const App = {
     let codeCol = -1, nameCol = -1, sharesCol = -1, costCol = -1, accountCol = -1;
     const result = [];
 
-    // ── Step1: ヘッダー行を探す（最初の30行以内）──
-    for (let i = 0; i < Math.min(lines.length, 30); i++) {
+    // ── Step1: ヘッダー行を探す（全行をスキャン）──
+    for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line) continue;
       const cols = this._splitCsv(line);
