@@ -969,16 +969,19 @@ const App = {
     return result;
   },
 
-  /* 楽天証券 保有株式一覧CSV（列名バリエーション対応 + データ推論フォールバック付き）
+  /* 楽天証券 CSV（複数セクション形式対応）
      形式例A: 受渡日,証券コード,銘柄名,市場,口座,保有数量,平均取得単価(円),時価(円),...
-     形式例B: 口座,銘柄コード,銘柄,数量,取得単価,参考単価,...
+     形式例B: (資産ポートフォリオ形式) ■国内株式 セクション内に 証券コード,銘柄,数量[株/口],取得金額[円],...
   */
   _parseRakuten(lines) {
-    let headerIdx = -1;
-    let codeCol = -1, nameCol = -1, sharesCol = -1, costCol = -1, accountCol = -1;
+    let headerIdx    = -1;
+    let codeCol      = -1, nameCol   = -1, sharesCol = -1;
+    let perShareCol  = -1;   // 平均取得単価 / 取得単価（1株あたり）
+    let totalCostCol = -1;   // 取得金額（総額 → 株数で割ってper-shareを求める）
+    let accountCol   = -1;
     const result = [];
 
-    // ── Step1: ヘッダー行を探す（全行をスキャン）──
+    // ── Step1: 全行をスキャンしてヘッダー行を探す ──
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line) continue;
@@ -986,13 +989,13 @@ const App = {
       const ci = cols.findIndex(c => /銘柄コード|証券コード/.test(c) || c.trim() === 'コード');
       if (ci < 0) continue;
 
-      codeCol    = ci;
-      // 銘柄名 または 銘柄（コードを除外）
-      nameCol    = cols.findIndex(c => /銘柄名|名称/.test(c) || (c.trim() === '銘柄'));
-      sharesCol  = cols.findIndex(c => /保有数量|保有株数|数量|株数|残高/.test(c));
-      costCol    = cols.findIndex(c => /平均取得単価|取得単価|平均単価|取得価格|取得コスト/.test(c));
-      accountCol = cols.findIndex(c => /^口座$|口座区分|口座種別|預り区分/.test(c));
-      headerIdx  = i;
+      codeCol      = ci;
+      nameCol      = cols.findIndex(c => /銘柄名|名称/.test(c) || c.trim() === '銘柄');
+      sharesCol    = cols.findIndex(c => /保有数量|保有株数|数量|株数|残高/.test(c) && !/評価|損益|取得金額|時価/.test(c));
+      perShareCol  = cols.findIndex(c => /平均取得単価|取得単価|平均単価/.test(c) && !/金額/.test(c));
+      totalCostCol = perShareCol < 0 ? cols.findIndex(c => /取得金額|取得価格/.test(c)) : -1;
+      accountCol   = cols.findIndex(c => /^口座$|口座区分|口座種別|預り区分/.test(c));
+      headerIdx    = i;
       break;
     }
 
@@ -1015,33 +1018,21 @@ const App = {
     // ── Step3: 名前列が未検出ならデータから推論（日本語を最も多く含む列）──
     if (nameCol < 0) {
       let best = -1, bestScore = 0;
+      const skip = new Set([codeCol, sharesCol, perShareCol, totalCostCol, accountCol]);
       for (let ci = 0; ci < colCount; ci++) {
-        if (ci === codeCol || ci === sharesCol || ci === costCol || ci === accountCol) continue;
-        const score = dataRows.filter(r => /[ぁ-んァ-ヶ一-龠ーA-Za-z]{2,}/.test(r[ci] ?? '')).length;
+        if (skip.has(ci)) continue;
+        const score = dataRows.filter(r => /[ぁ-んァ-ヶ一-龠ー]{2,}/.test(r[ci] ?? '')).length;
         if (score > bestScore) { bestScore = score; best = ci; }
       }
       if (best >= 0) nameCol = best;
     }
 
-    // ── Step4: 取得単価列が未検出ならデータから推論（50〜2,000,000 の数値列）──
-    if (costCol < 0) {
-      let best = -1, bestScore = 0;
-      for (let ci = 0; ci < colCount; ci++) {
-        if (ci === codeCol || ci === nameCol || ci === sharesCol || ci === accountCol) continue;
-        const score = dataRows.filter(r => {
-          const n = parseFloat((r[ci] ?? '').replace(/,/g, ''));
-          return !isNaN(n) && n >= 50 && n <= 2000000;
-        }).length;
-        if (score > bestScore) { bestScore = score; best = ci; }
-      }
-      if (best >= 0) costCol = best;
-    }
-
-    // ── Step5: 株数列が未検出ならデータから推論（1〜1,000,000 の整数）──
+    // ── Step4: 株数列が未検出ならデータから推論（整数・小さい値）──
     if (sharesCol < 0) {
       let best = -1, bestScore = 0;
+      const skip = new Set([codeCol, nameCol, perShareCol, totalCostCol, accountCol]);
       for (let ci = 0; ci < colCount; ci++) {
-        if (ci === codeCol || ci === nameCol || ci === costCol || ci === accountCol) continue;
+        if (skip.has(ci)) continue;
         const score = dataRows.filter(r => {
           const v = (r[ci] ?? '').replace(/,/g, '');
           const n = Number(v);
@@ -1052,23 +1043,38 @@ const App = {
       if (best >= 0) sharesCol = best;
     }
 
-    // ── Step6: デバッグ情報を保存 ──
+    // ── Step5: デバッグ情報を保存 ──
     if (this._csvState) {
-      const headerLine = lines[headerIdx];
-      const headerCols = this._splitCsv(headerLine);
+      const headerCols = this._splitCsv(lines[headerIdx]);
       this._csvState._debug = {
         headerCols,
-        codeCol, nameCol, sharesCol, costCol, accountCol,
+        codeCol, nameCol, sharesCol,
+        costCol: perShareCol >= 0 ? perShareCol : totalCostCol,
+        accountCol,
         firstDataRow: dataRows[0] ?? [],
       };
     }
 
-    // ── Step7: パース実行 ──
+    // ── Step6: パース実行 ──
     for (const cols of dataRows) {
+      const code   = (cols[codeCol] ?? '').replace(/[^\d]/g, '');
+      if (!code || code.length < 4) continue;
+      const name   = nameCol   >= 0 ? (cols[nameCol]   ?? '').trim() : '';
+      const shares = sharesCol >= 0 ? parseFloat((cols[sharesCol] ?? '').replace(/,/g, '')) : 0;
+      if (!shares || shares <= 0) continue;
+
+      let avgCost = 0;
+      if (perShareCol >= 0) {
+        avgCost = parseFloat((cols[perShareCol] ?? '').replace(/,/g, ''));
+      } else if (totalCostCol >= 0) {
+        const totalCost = parseFloat((cols[totalCostCol] ?? '').replace(/,/g, ''));
+        avgCost = isNaN(totalCost) ? 0 : totalCost / shares;
+      }
+      if (isNaN(avgCost)) avgCost = 0;
+
       const accRaw = accountCol >= 0 ? (cols[accountCol] ?? '') : '';
       const account = /NISA|成長|積立/.test(accRaw) ? 'NISA' : /一般/.test(accRaw) ? '一般' : '特定';
-      const h = this._extractHolding(cols, codeCol, nameCol, sharesCol, costCol, account);
-      if (h) result.push(h);
+      result.push({ code, name: name || code, shares, avgCost, account });
     }
     return result;
   },
