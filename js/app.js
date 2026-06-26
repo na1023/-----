@@ -687,10 +687,10 @@ const App = {
   },
 
   /* ===== CSV Import (モーダルフロー) ===== */
-  _csvState: { broker: null, brokerName: null, parsed: [] },
+  _csvState: { broker: null, brokerName: null, parsed: [], _debug: null },
 
   triggerCsvImport() {
-    this._csvState = { broker: null, brokerName: null, parsed: [] };
+    this._csvState = { broker: null, brokerName: null, parsed: [], _debug: null };
     this._openCsvModal();
   },
 
@@ -779,11 +779,28 @@ const App = {
   },
 
   _csvShowStep2() {
-    const { brokerName, parsed } = this._csvState;
+    const { brokerName, parsed, _debug } = this._csvState;
     document.getElementById('csv-modal-title').textContent = `② 取込内容を確認`;
 
     const previewRows = parsed.slice(0, 8);
     const remaining   = parsed.length - previewRows.length;
+
+    // デバッグパネル（楽天証券で列が取得できていない場合に表示）
+    const hasNameIssue = parsed.some(h => h.name === h.code);
+    const hasCostIssue = parsed.every(h => h.avgCost === 0);
+    const debugHtml = (_debug && (hasNameIssue || hasCostIssue)) ? `
+      <details style="margin-bottom:12px;font-size:.8rem;background:var(--bg-2);border:1px solid var(--border);border-radius:8px;padding:8px 12px">
+        <summary style="cursor:pointer;font-weight:600;color:var(--text-2)">⚠️ 列検出の詳細（開発者向け）</summary>
+        <div style="margin-top:8px;overflow-x:auto">
+          <table style="font-size:.75rem;border-collapse:collapse;width:100%">
+            <thead><tr>${_debug.headerCols.map((c,i) => `<th style="border:1px solid var(--border);padding:3px 6px;background:var(--bg-3);white-space:nowrap">[${i}]<br>${c||'(空)'}</th>`).join('')}</tr></thead>
+            <tbody><tr>${_debug.firstDataRow.map(v => `<td style="border:1px solid var(--border);padding:3px 6px;white-space:nowrap">${v||'(空)'}</td>`).join('')}</tr></tbody>
+          </table>
+          <p style="margin-top:6px;color:var(--text-3)">
+            コード[${_debug.codeCol}] 銘柄名[${_debug.nameCol}] 株数[${_debug.sharesCol}] 取得単価[${_debug.costCol}] 口座[${_debug.accountCol}]
+          </p>
+        </div>
+      </details>` : '';
 
     document.getElementById('csv-modal-body').innerHTML = `
       <div class="csv-summary-bar">
@@ -791,6 +808,7 @@ const App = {
         <strong>${brokerName}</strong>
         <span style="margin-left:8px;color:var(--text-2)">${parsed.length}件を検出</span>
       </div>
+      ${debugHtml}
 
       <div class="csv-preview-table">
         <table>
@@ -1029,7 +1047,18 @@ const App = {
       if (best >= 0) sharesCol = best;
     }
 
-    // ── Step6: パース実行 ──
+    // ── Step6: デバッグ情報を保存 ──
+    if (this._csvState) {
+      const headerLine = lines[headerIdx];
+      const headerCols = this._splitCsv(headerLine);
+      this._csvState._debug = {
+        headerCols,
+        codeCol, nameCol, sharesCol, costCol, accountCol,
+        firstDataRow: dataRows[0] ?? [],
+      };
+    }
+
+    // ── Step7: パース実行 ──
     for (const cols of dataRows) {
       const accRaw = accountCol >= 0 ? (cols[accountCol] ?? '') : '';
       const account = /NISA|成長|積立/.test(accRaw) ? 'NISA' : /一般/.test(accRaw) ? '一般' : '特定';
