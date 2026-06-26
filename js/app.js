@@ -776,24 +776,42 @@ const App = {
   },
 
   _detectBroker(text, filename) {
-    const head = text.slice(0, 1000);
+    // 先頭 2000文字 + 最初のヘッダー行を確実に含む
+    const head = text.slice(0, 2000);
     const fn   = (filename || '').toLowerCase();
-    // SBI: 預り区分列、またはファイル名/内容に SBI
-    if (/SBI|エスビーアイ/i.test(head) || /預り区分|株式（特定|株式（一般|株式（NISA/.test(head)) return 'SBI';
-    if (/sbi/.test(fn)) return 'SBI';
-    // 楽天: 内容・ファイル名・受渡日+証券コード構造
-    if (/楽天証券|楽天ブランド|楽天証|RAKUTEN/i.test(head)) return '楽天';
-    if (/rakuten|rakutenbank/.test(fn)) return '楽天';
-    // 楽天のCSVは「受渡日」「証券コード」「平均取得単価」の組み合わせが特徴的
-    if (/受渡日/.test(head) && /証券コード/.test(head)) return '楽天';
-    // 受渡日があれば楽天の可能性が高い（SBIにはない）
+
+    // ===== ブローカー名が明示されている場合（最優先） =====
+    if (/楽天証券/.test(head))                    return '楽天';
+    if (/rakuten/i.test(fn))                       return '楽天';
+    if (/SBI証券|エスビーアイ証券/.test(head))     return 'SBI';
+    if (/松井証券/.test(head))                     return '松井';
+    if (/マネックス証券|マネックスsec/i.test(head)) return 'マネックス';
+    if (/monex/i.test(fn) || /matsui/i.test(fn))  return fn.includes('monex') ? 'マネックス' : '松井';
+
+    // ===== 列構造で判定（各社のCSVに固有の列名の組み合わせ） =====
+    // 楽天: 「証券コード」はSBIにない（SBIは「銘柄コード」）
+    if (/証券コード/.test(head))                   return '楽天';
+    // 楽天: 「受渡日」+「保有数量」の組み合わせ
+    if (/受渡日/.test(head) && /保有数量/.test(head)) return '楽天';
+    // 楽天: 「受渡日」+「平均取得単価」の組み合わせ
     if (/受渡日/.test(head) && /平均取得単価/.test(head)) return '楽天';
-    // 松井
-    if (/松井証券|MATSUI/i.test(head) || /matsui/.test(fn) || /建玉/.test(head)) return '松井';
-    // マネックス
-    if (/マネックス|MONEX/i.test(head) || /monex/.test(fn)) return 'マネックス';
-    // 列名から推測（汎用フォールバック前に試みる）
-    if (/証券コード/.test(head)) return '楽天'; // 証券コードは楽天固有
+
+    // SBI: 固有のセクション見出し（口座種別ごとに区切り行がある）
+    if (/株式（特定|株式（一般|株式（NISA/.test(head)) return 'SBI';
+    if (/預り区分/.test(head))                     return 'SBI';
+    // SBI: 「保有株数」列（楽天は「保有数量」）
+    if (/保有株数/.test(head) && /銘柄コード/.test(head)) return 'SBI';
+    // SBI: ファイル名に sbi
+    if (/sbi/.test(fn))                            return 'SBI';
+
+    // 松井: 「建玉」列
+    if (/建玉/.test(head))                         return '松井';
+    // マネックス: 「マネックス」
+    if (/マネックス/.test(head))                   return 'マネックス';
+
+    // 「銘柄コード」のみ → SBI寄り
+    if (/銘柄コード/.test(head))                   return 'SBI';
+
     return '汎用';
   },
 
