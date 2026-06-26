@@ -946,35 +946,91 @@ const App = {
     return result;
   },
 
-  /* 楽天証券 保有株式一覧CSV
-     代表的な形式:
-       受渡日,証券コード,銘柄名,市場,口座,保有数量,平均取得単価(円),時価(円),評価損益(円),評価損益率(%)
+  /* 楽天証券 保有株式一覧CSV（列名バリエーション対応 + データ推論フォールバック付き）
+     形式例A: 受渡日,証券コード,銘柄名,市場,口座,保有数量,平均取得単価(円),時価(円),...
+     形式例B: 口座,銘柄コード,銘柄,数量,取得単価,参考単価,...
   */
   _parseRakuten(lines) {
     let headerIdx = -1;
     let codeCol = -1, nameCol = -1, sharesCol = -1, costCol = -1, accountCol = -1;
     const result = [];
 
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (headerIdx < 0) {
-        // 銘柄コード / 証券コード を含む行をヘッダーとして認識
-        if (!/銘柄コード|証券コード|コード/.test(line)) continue;
-        const cols = this._splitCsv(line);
-        codeCol    = cols.findIndex(c => /銘柄コード|証券コード/.test(c) || (c.trim() === 'コード'));
-        nameCol    = cols.findIndex(c => /銘柄名/.test(c));
-        // 保有数量 / 数量 / 株数
-        sharesCol  = cols.findIndex(c => /保有数量|数量|株数/.test(c));
-        // 平均取得単価 (円) など括弧付きも対応
-        costCol    = cols.findIndex(c => /平均取得単価|取得単価|平均単価/.test(c));
-        // 口座 / 口座区分
-        accountCol = cols.findIndex(c => /^口座$|口座区分|口座種別/.test(c));
-        if (codeCol >= 0 && sharesCol >= 0) { headerIdx = i; }
-        continue;
+    // ── Step1: ヘッダー行を探す（最初の30行以内）──
+    for (let i = 0; i < Math.min(lines.length, 30); i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      const cols = this._splitCsv(line);
+      const ci = cols.findIndex(c => /銘柄コード|証券コード/.test(c) || c.trim() === 'コード');
+      if (ci < 0) continue;
+
+      codeCol    = ci;
+      // 銘柄名 または 銘柄（コードを除外）
+      nameCol    = cols.findIndex(c => /銘柄名|名称/.test(c) || (c.trim() === '銘柄'));
+      sharesCol  = cols.findIndex(c => /保有数量|保有株数|数量|株数|残高/.test(c));
+      costCol    = cols.findIndex(c => /平均取得単価|取得単価|平均単価|取得価格|取得コスト/.test(c));
+      accountCol = cols.findIndex(c => /^口座$|口座区分|口座種別|預り区分/.test(c));
+      headerIdx  = i;
+      break;
+    }
+
+    if (headerIdx < 0) return result;
+
+    // ── Step2: データ行を収集（コード列が4〜5桁の数字の行のみ）──
+    const dataRows = [];
+    for (let i = headerIdx + 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      const cols = this._splitCsv(line);
+      if (cols.length < 2) continue;
+      const codeVal = (cols[codeCol] ?? '').replace(/[^\d]/g, '');
+      if (!/^\d{4,5}$/.test(codeVal)) continue;
+      dataRows.push(cols);
+    }
+    if (!dataRows.length) return result;
+    const colCount = dataRows[0].length;
+
+    // ── Step3: 名前列が未検出ならデータから推論（日本語を最も多く含む列）──
+    if (nameCol < 0) {
+      let best = -1, bestScore = 0;
+      for (let ci = 0; ci < colCount; ci++) {
+        if (ci === codeCol || ci === sharesCol || ci === costCol || ci === accountCol) continue;
+        const score = dataRows.filter(r => /[ぁ-んァ-ヶ一-龠ーA-Za-z]{2,}/.test(r[ci] ?? '')).length;
+        if (score > bestScore) { bestScore = score; best = ci; }
       }
-      const line2 = lines[i];
-      if (!line2.trim()) continue;
-      const cols   = this._splitCsv(line2);
+      if (best >= 0) nameCol = best;
+    }
+
+    // ── Step4: 取得単価列が未検出ならデータから推論（50〜2,000,000 の数値列）──
+    if (costCol < 0) {
+      let best = -1, bestScore = 0;
+      for (let ci = 0; ci < colCount; ci++) {
+        if (ci === codeCol || ci === nameCol || ci === sharesCol || ci === accountCol) continue;
+        const score = dataRows.filter(r => {
+          const n = parseFloat((r[ci] ?? '').replace(/,/g, ''));
+          return !isNaN(n) && n >= 50 && n <= 2000000;
+        }).length;
+        if (score > bestScore) { bestScore = score; best = ci; }
+      }
+      if (best >= 0) costCol = best;
+    }
+
+    // ── Step5: 株数列が未検出ならデータから推論（1〜1,000,000 の整数）──
+    if (sharesCol < 0) {
+      let best = -1, bestScore = 0;
+      for (let ci = 0; ci < colCount; ci++) {
+        if (ci === codeCol || ci === nameCol || ci === costCol || ci === accountCol) continue;
+        const score = dataRows.filter(r => {
+          const v = (r[ci] ?? '').replace(/,/g, '');
+          const n = Number(v);
+          return v !== '' && Number.isInteger(n) && n >= 1 && n <= 1000000;
+        }).length;
+        if (score > bestScore) { bestScore = score; best = ci; }
+      }
+      if (best >= 0) sharesCol = best;
+    }
+
+    // ── Step6: パース実行 ──
+    for (const cols of dataRows) {
       const accRaw = accountCol >= 0 ? (cols[accountCol] ?? '') : '';
       const account = /NISA|成長|積立/.test(accRaw) ? 'NISA' : /一般/.test(accRaw) ? '一般' : '特定';
       const h = this._extractHolding(cols, codeCol, nameCol, sharesCol, costCol, account);
