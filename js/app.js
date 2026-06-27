@@ -58,6 +58,8 @@ const App = {
   page: 'dashboard',
   divYear: new Date().getFullYear(),
   taxAfter: false,
+  usdInTotal: false,   // 年間合計にUSD換算を含めるか
+  USD_RATE: 150,       // 参考換算レート（円/USD）
   holdFilter: 'all',
   brokerFilter: 'all',
   holdView: 'broker',    // 'broker' = 証券会社別 | 'merged' = 銘柄別合算
@@ -1196,6 +1198,10 @@ const App = {
             <button class="tax-btn ${!this.taxAfter?'active':''}" onclick="App.setTax(false)">税引前</button>
             <button class="tax-btn ${this.taxAfter?'active':''}" onclick="App.setTax(true)">税引後</button>
           </div>
+          ${result.totalUSD > 0 ? `<div class="tax-toggle">
+            <button class="tax-btn ${!this.usdInTotal?'active':''}" onclick="App.setUsdInTotal(false)">円のみ</button>
+            <button class="tax-btn ${this.usdInTotal?'active':''}" onclick="App.setUsdInTotal(true)">USD含む</button>
+          </div>` : ''}
           <button class="btn-primary-sm" onclick="App.triggerDivCsvImport()" style="display:flex;align-items:center;gap:5px;font-size:.8125rem">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             配当CSV取込
@@ -1206,14 +1212,25 @@ const App = {
 
       <div class="div-summary">
         <div class="card">
-          <div class="card-title">年間配当合計（円）</div>
-          <div class="card-value">${yen(result.total)}</div>
-          ${result.totalUSD > 0 ? `<div class="card-sub" style="color:var(--text-2)">+ $${result.totalUSD.toFixed(2)} USD</div>` : `<div class="card-sub">${this.taxAfter ? '税引後' : '税引前'}</div>`}
+          ${(() => {
+            const usdYen = Math.round(result.totalUSD * this.USD_RATE);
+            const displayTotal = this.usdInTotal ? result.total + usdYen : result.total;
+            const sub = this.usdInTotal && result.totalUSD > 0
+              ? `円 + $${result.totalUSD.toFixed(2)}×${this.USD_RATE}円換算`
+              : result.totalUSD > 0 ? `+ $${result.totalUSD.toFixed(2)} USD（別）` : (this.taxAfter ? '税引後' : '税引前');
+            return `<div class="card-title">年間配当合計</div>
+            <div class="card-value">${yen(displayTotal)}</div>
+            <div class="card-sub" style="color:var(--text-2)">${sub}</div>`;
+          })()}
         </div>
         <div class="card">
-          <div class="card-title">月平均（円）</div>
-          <div class="card-value">${yen(result.total / 12)}</div>
-          <div class="card-sub">1ヶ月あたり</div>
+          ${(() => {
+            const usdYen = Math.round(result.totalUSD * this.USD_RATE);
+            const displayTotal = this.usdInTotal ? result.total + usdYen : result.total;
+            return `<div class="card-title">月平均</div>
+            <div class="card-value">${yen(displayTotal / 12)}</div>
+            <div class="card-sub">1ヶ月あたり</div>`;
+          })()}
         </div>
         <div class="card">
           <div class="card-title">税額概算</div>
@@ -1288,6 +1305,7 @@ const App = {
 
   setDivYear(y) { this.divYear = y; this.renderDividends(); },
   setTax(after) { this.taxAfter = after; this.renderDividends(); },
+  setUsdInTotal(v) { this.usdInTotal = v; this.renderDividends(); },
 
   triggerDivCsvImport() {
     const input = document.createElement('input');
