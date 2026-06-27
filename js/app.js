@@ -1187,6 +1187,16 @@ const App = {
     const totalPost = Portfolio.annualDividend(this.holdings, this.dividends, year, true).total;
     const hasAny = Object.keys(this.dividends).length > 0;
 
+    // USDデータがある場合は為替レートをバックグラウンド取得（初回のみ、取得後に再描画）
+    const hasUSD = Object.values(this.dividends).flat().some(d => (d.grossUSD ?? 0) > 0);
+    if (hasUSD && !this._usdRateFetched && !this._usdRateFetching) {
+      this._usdRateFetching = true;
+      YahooFinance.getUsdJpy()
+        .then(rate => { this.USD_RATE = rate; this._usdRateFetched = true; this.renderDividends(); })
+        .catch(() => { this._usdRateFetched = true; })
+        .finally(() => { this._usdRateFetching = false; });
+    }
+
     const el = document.getElementById('page-area');
     el.innerHTML = `
       <div class="div-hdr">
@@ -1303,7 +1313,7 @@ const App = {
     });
   },
 
-  setDivYear(y) { this.divYear = y; this.renderDividends(); },
+  setDivYear(y) { this.divYear = y; this._usdRateFetched = false; this.renderDividends(); },
   setTax(after) { this.taxAfter = after; this.renderDividends(); },
   setUsdInTotal(v) { this.usdInTotal = v; this.renderDividends(); },
 

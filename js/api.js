@@ -193,5 +193,14 @@ const YahooFinance = (() => {
     } catch { return []; }
   }
 
-  return { getQuote, getQuotes, getDividends, getDividendsCached, getDividendsMany, getSplits, getSplitsCached, getSplitsMany, clearDivCache, clearMemCache, searchSymbol };
+  /* USD/JPY レート取得 */
+  async function getUsdJpy() {
+    const url  = `https://query1.finance.yahoo.com/v8/finance/chart/USDJPY=X?interval=1d&range=1d`;
+    const data = await fetchRaw(url);
+    const price = data?.chart?.result?.[0]?.meta?.regularMarketPrice;
+    if (!price) throw new Error('USD/JPY rate unavailable');
+    return Math.round(price * 100) / 100;
+  }
+
+  return { getQuote, getQuotes, getUsdJpy, getDividends, getDividendsCached, getDividendsMany, getSplits, getSplitsCached, getSplitsMany, clearDivCache, clearMemCache, searchSymbol };
 })();
