@@ -283,9 +283,21 @@ tbody tr:hover td { background: #f8fafc; }
   position: fixed; inset: 0; background: rgba(15,23,42,.45);
   backdrop-filter: blur(3px); z-index: 1000;
   display: flex; align-items: center; justify-content: center; padding: 16px;
-  opacity: 0; pointer-events: none; transition: opacity .2s;
+  opacity: 1; pointer-events: all; transition: opacity .2s;
 }
+.modal-box {
+  background: var(--surface); border-radius: 16px; width: 100%; max-width: 420px;
+  box-shadow: var(--shadow-lg); padding: 24px;
+}
+.broker-select-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.broker-opt {
+  padding: 8px 16px; border-radius: 8px; border: 1.5px solid var(--border);
+  background: var(--bg); color: var(--text-2); font-size: .875rem; font-weight: 500; cursor: pointer;
+  transition: all .15s;
+}
+.broker-opt.selected { border-color: var(--primary); background: #eff6ff; color: var(--primary); font-weight: 600; }
 .modal-overlay.open { opacity: 1; pointer-events: all; }
+.modal-overlay:not(.open):not(:has(.modal-box)) { opacity: 0; pointer-events: none; }
 .modal {
   background: var(--surface); border-radius: 16px; width: 100%; max-width: 500px;
   box-shadow: var(--shadow-lg); display: flex; flex-direction: column;

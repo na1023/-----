@@ -1352,7 +1352,7 @@ const App = {
     input.click();
   },
 
-  _parseDivCsv(rawText, filename) {
+  async _parseDivCsv(rawText, filename) {
     const lines = rawText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
     if (!lines.length) { Toast.show('CSVが空です', 'error'); return; }
 
@@ -1460,16 +1460,23 @@ const App = {
     const parsed = Object.values(mergedMap);
 
     const preview = [...new Set(parsed.map(d => d.name))].slice(0, 5).join(', ');
-    const hasExisting = Object.keys(this.dividends).length > 0;
-    let replaceAll = false;
-    if (hasExisting) {
-      const choice = confirm(
-        `配当データ ${parsed.length}件を検出:\n${preview}…\n\nOK = 既存データを全削除してこのCSVで置換\nキャンセル = 既存に追加（重複は上書き）`
-      );
-      replaceAll = choice;
-    }
+    const brokerLabel = broker === 'SBI' ? 'SBI証券' : broker === '楽天' ? '楽天証券' : '不明';
 
-    if (replaceAll) this.dividends = {};
+    // 証券会社を確認・選択させる
+    const brokerChoice = await this._showBrokerDialog(broker, preview, parsed.length);
+    if (brokerChoice === null) return; // キャンセル
+    const { selectedBroker, replace } = brokerChoice;
+
+    // brokerフィールドを選択した証券会社で上書き
+    parsed.forEach(d => { d.broker = selectedBroker; });
+
+    if (replace) {
+      // この証券のデータだけ削除（他証券のデータは保持）
+      Object.keys(this.dividends).forEach(code => {
+        this.dividends[code] = this.dividends[code].filter(x => (x.broker ?? '') !== selectedBroker);
+        if (!this.dividends[code].length) delete this.dividends[code];
+      });
+    }
 
     let added = 0, updated = 0;
     parsed.forEach(d => {
@@ -1489,6 +1496,60 @@ const App = {
     Sync.push();
     Toast.show(`配当データ取込完了：新規${added}件・更新${updated}件`, 'success', 5000);
     this.renderDividends();
+  },
+
+  _showBrokerDialog(detectedBroker, preview, count) {
+    return new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.innerHTML = `
+        <div class="modal-box">
+          <div class="modal-title">証券会社を選択</div>
+          <p style="color:var(--text-2);font-size:.875rem;margin:0 0 16px">${count}件検出: ${preview}…</p>
+          <div class="broker-select-row">
+            <button class="broker-opt ${detectedBroker==='SBI'?'selected':''}" data-b="SBI">SBI証券</button>
+            <button class="broker-opt ${detectedBroker==='楽天'?'selected':''}" data-b="楽天">楽天証券</button>
+            <button class="broker-opt ${!detectedBroker?'selected':''}" data-b="">その他</button>
+          </div>
+          <div style="margin:20px 0 8px;font-size:.875rem;color:var(--text-2)">取込方法</div>
+          <div class="broker-select-row">
+            <button class="broker-opt selected" id="bm-replace" style="flex:1">この証券のデータを置換</button>
+            <button class="broker-opt" id="bm-add" style="flex:1">追加（重複は上書き）</button>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:20px;justify-content:flex-end">
+            <button class="btn-ghost" id="bd-cancel" style="padding:8px 16px">キャンセル</button>
+            <button class="btn-primary-sm" id="bd-ok" style="padding:8px 20px">取込</button>
+          </div>
+        </div>`;
+
+      let selectedBroker = detectedBroker ?? '';
+      let replace = true;
+
+      overlay.querySelectorAll('.broker-opt[data-b]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          overlay.querySelectorAll('.broker-opt[data-b]').forEach(b => b.classList.remove('selected'));
+          btn.classList.add('selected');
+          selectedBroker = btn.dataset.b;
+        });
+      });
+      overlay.querySelector('#bm-replace').addEventListener('click', () => {
+        replace = true;
+        overlay.querySelector('#bm-replace').classList.add('selected');
+        overlay.querySelector('#bm-add').classList.remove('selected');
+      });
+      overlay.querySelector('#bm-add').addEventListener('click', () => {
+        replace = false;
+        overlay.querySelector('#bm-add').classList.add('selected');
+        overlay.querySelector('#bm-replace').classList.remove('selected');
+      });
+      overlay.querySelector('#bd-cancel').addEventListener('click', () => {
+        overlay.remove(); resolve(null);
+      });
+      overlay.querySelector('#bd-ok').addEventListener('click', () => {
+        overlay.remove(); resolve({ selectedBroker, replace });
+      });
+      document.body.appendChild(overlay);
+    });
   },
 
   clearDividends() {
