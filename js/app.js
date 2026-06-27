@@ -57,6 +57,7 @@ const App = {
   quoteTime: null,
   page: 'dashboard',
   divYear: new Date().getFullYear(),
+  divMonth: null,
   taxAfter: false,
   usdInTotal: false,   // 年間合計にUSD換算を含めるか
   USD_RATE: 150,       // 参考換算レート（円/USD）
@@ -1180,11 +1181,22 @@ const App = {
   /* ===== Dividends ===== */
   renderDividends() {
     const year   = this.divYear;
+    const mon    = this.divMonth ?? null; // null=全月, 1-12=絞込み
     const years  = Array.from({ length: 6 }, (_, i) => new Date().getFullYear() - i);
-    const result = Portfolio.annualDividend(this.holdings, this.dividends, year, this.taxAfter);
+
+    // 月絞込み用: divMonth が指定されていれば該当月のエントリだけ残したコピーを使う
+    const filteredDivs = mon
+      ? Object.fromEntries(
+          Object.entries(this.dividends)
+            .map(([code, divs]) => [code, divs.filter(d => parseInt(String(d.date).slice(5,7),10) === mon)])
+            .filter(([, divs]) => divs.length)
+        )
+      : this.dividends;
+
+    const result = Portfolio.annualDividend(this.holdings, filteredDivs, year, this.taxAfter);
     const months = Portfolio.monthlyDividend(this.holdings, this.dividends, year, this.taxAfter);
-    const totalPre  = Portfolio.annualDividend(this.holdings, this.dividends, year, false).total;
-    const totalPost = Portfolio.annualDividend(this.holdings, this.dividends, year, true).total;
+    const totalPre  = Portfolio.annualDividend(this.holdings, filteredDivs, year, false).total;
+    const totalPost = Portfolio.annualDividend(this.holdings, filteredDivs, year, true).total;
     const hasAny = Object.keys(this.dividends).length > 0;
 
     // USDデータがある場合は為替レートをバックグラウンド取得（初回のみ、取得後に再描画）
@@ -1279,6 +1291,11 @@ const App = {
         <div class="div-chart-wrap"><canvas id="chart-div"></canvas></div>
       </div>
 
+      ${mon ? `<div class="month-filter-bar">
+        <span>${mon}月の配当</span>
+        <button onclick="App.setDivMonth(null)" class="month-reset-btn">✕ 全月表示</button>
+      </div>` : ''}
+
       ${!hasAny ? `<div class="empty-state">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
         <h3>配当データがありません</h3>
@@ -1323,7 +1340,11 @@ const App = {
         labels: ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'],
         datasets: [{
           data: months,
-          backgroundColor: months.map(v => v > 0 ? 'rgba(37,99,235,.75)' : 'rgba(203,213,225,.5)'),
+          backgroundColor: months.map((v, i) => {
+            if (mon && i + 1 === mon) return 'rgba(37,99,235,1)';
+            if (mon) return 'rgba(203,213,225,.4)';
+            return v > 0 ? 'rgba(37,99,235,.75)' : 'rgba(203,213,225,.5)';
+          }),
           borderRadius: 5,
         }],
       },
@@ -1334,11 +1355,18 @@ const App = {
           x: { grid: { display: false }, ticks: { font: { size: 11 } } },
           y: { ticks: { callback: v => yen(v), font: { size: 11 } }, grid: { color: '#f1f5f9' }, min: 0 },
         },
+        onClick: (_, els) => {
+          if (!els.length) return;
+          const clicked = els[0].index + 1;
+          App.setDivMonth(mon === clicked ? null : clicked);
+        },
+        onHover: (e, els) => { e.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
       },
     });
   },
 
-  setDivYear(y) { this.divYear = y; this._usdRateFetched = false; this.renderDividends(); },
+  setDivYear(y) { this.divYear = y; this.divMonth = null; this._usdRateFetched = false; this.renderDividends(); },
+  setDivMonth(m) { this.divMonth = m; this.renderDividends(); },
   setTax(after) { this.taxAfter = after; this.renderDividends(); },
   setUsdInTotal(v) { this.usdInTotal = v; this.renderDividends(); },
 

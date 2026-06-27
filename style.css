@@ -233,6 +233,9 @@ tbody tr:hover td { background: #f8fafc; }
 .tax-btn.active { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: var(--shadow); }
 .div-summary { display: grid; grid-template-columns: repeat(3,1fr); gap: 16px; margin-bottom: 20px; }
 .div-broker-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 20px; }
+.month-filter-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; font-weight: 600; font-size: .9375rem; }
+.month-reset-btn { padding: 4px 12px; border-radius: 20px; border: 1.5px solid var(--border); background: var(--bg); color: var(--text-2); font-size: .8125rem; cursor: pointer; transition: all .15s; }
+.month-reset-btn:hover { border-color: var(--primary); color: var(--primary); }
 .broker-card { border-left: 3px solid var(--primary); }
 .div-chart-wrap { height: 220px; margin-bottom: 20px; }
 
