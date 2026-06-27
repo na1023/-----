@@ -1403,10 +1403,16 @@ const App = {
     const parsed = Object.values(mergedMap);
 
     const preview = [...new Set(parsed.map(d => d.name))].slice(0, 5).join(', ');
-    const mode = confirm(
-      `配当データ ${parsed.length}件を検出:\n${preview}…\n\nOK = 既存に追加（重複は上書き）\nキャンセル = キャンセル`
-    );
-    if (!mode) return;
+    const hasExisting = Object.keys(this.dividends).length > 0;
+    let replaceAll = false;
+    if (hasExisting) {
+      const choice = confirm(
+        `配当データ ${parsed.length}件を検出:\n${preview}…\n\nOK = 既存データを全削除してこのCSVで置換\nキャンセル = 既存に追加（重複は上書き）`
+      );
+      replaceAll = choice;
+    }
+
+    if (replaceAll) this.dividends = {};
 
     let added = 0, updated = 0;
     parsed.forEach(d => {
