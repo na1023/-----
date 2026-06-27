@@ -1337,9 +1337,9 @@ const App = {
 
     for (let i = 0; i < Math.min(lines.length, 20); i++) {
       const cols = this._splitCsv(lines[i]);
-      const hasDivKey = cols.some(c => /受取日|入金日|支払日|配当|dividend|受渡日/i.test(c));
+      const hasDivKey = cols.some(c => /受取日|入金日|支払日|配当|dividend|受渡日|照会期間/i.test(c));
       if (!hasDivKey) continue;
-      dateCol     = cols.findIndex(c => /受取日|入金日|支払日|決済日|受渡日/i.test(c));
+      dateCol     = cols.findIndex(c => /受取日|入金日|支払日|決済日|受渡日|照会期間/i.test(c));
       codeCol     = cols.findIndex(c => /銘柄コード|証券コード/i.test(c));
       nameCol     = cols.findIndex(c => /銘柄名|^銘柄$/.test(c));
       grossCol    = cols.findIndex(c => /税引前|gross/i.test(c));
@@ -1364,7 +1364,9 @@ const App = {
       if (cols.length < 2) continue;
 
       const rawDate = (cols[dateCol] ?? '');
-      const dateStr = rawDate.replace(/\//g, '-').replace(/年|月/g, '-').replace(/日/, '').trim().slice(0, 10);
+      let dateStr = rawDate.replace(/\//g, '-').replace(/年|月/g, '-').replace(/日/, '').trim();
+      dateStr = dateStr.replace(/^(\d{4})-(\d{1,2})-(\d{1,2})/, (_, y, m, d) =>
+        `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`).slice(0, 10);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) continue;
 
       let rawName = nameCol >= 0 ? (cols[nameCol] ?? '').trim() : '';
