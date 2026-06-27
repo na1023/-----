@@ -232,6 +232,8 @@ tbody tr:hover td { background: #f8fafc; }
 .tax-btn { padding: 5px 14px; border-radius: 6px; border: none; background: none; font-size: .8125rem; font-weight: 500; color: var(--text-2); cursor: pointer; transition: all .15s; }
 .tax-btn.active { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: var(--shadow); }
 .div-summary { display: grid; grid-template-columns: repeat(3,1fr); gap: 16px; margin-bottom: 20px; }
+.div-broker-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 20px; }
+.broker-card { border-left: 3px solid var(--primary); }
 .div-chart-wrap { height: 220px; margin-bottom: 20px; }
 
 /* ===== P&L ===== */

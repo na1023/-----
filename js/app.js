@@ -1249,6 +1249,31 @@ const App = {
         </div>
       </div>
 
+      ${(() => {
+        // 証券会社別集計
+        const allDivs = Object.values(this.dividends).flat()
+          .filter(d => String(d.date).startsWith(String(year)));
+        const brokers = [...new Set(allDivs.map(d => d.broker).filter(Boolean))].sort();
+        if (brokers.length < 2) return '';
+        return `<div class="div-broker-row">
+          ${brokers.map(b => {
+            const bDivs = allDivs.filter(d => d.broker === b);
+            const gross = bDivs.reduce((s, d) => s + (d.gross ?? 0), 0);
+            const net   = bDivs.reduce((s, d) => s + (d.net   ?? 0), 0);
+            const gUSD  = bDivs.reduce((s, d) => s + (d.grossUSD ?? 0), 0);
+            const nUSD  = bDivs.reduce((s, d) => s + (d.netUSD   ?? 0), 0);
+            const mainVal = this.taxAfter ? net : gross;
+            const usdVal  = this.taxAfter ? nUSD : gUSD;
+            const label   = b === 'SBI' ? 'SBI証券' : b === '楽天' ? '楽天証券' : b;
+            return `<div class="card broker-card">
+              <div class="card-title">${label}</div>
+              <div class="card-value" style="font-size:1.25rem">${yen(mainVal)}</div>
+              ${usdVal > 0 ? `<div class="card-sub">+ $${usdVal.toFixed(2)} USD</div>` : ''}
+            </div>`;
+          }).join('')}
+        </div>`;
+      })()}
+
       <div class="card" style="margin-bottom:20px">
         <div class="card-title">月別配当金 (${year}年)</div>
         <div class="div-chart-wrap"><canvas id="chart-div"></canvas></div>
@@ -1333,7 +1358,10 @@ const App = {
 
     let headerIdx = -1, dateCol = -1, codeCol = -1, nameCol = -1;
     let grossCol = -1, netCol = -1, currencyCol = -1;
-    let nameHasCode = false; // SBI形式: 銘柄名にコードが埋め込まれている
+    let nameHasCode = false;
+    const broker = /^DISTRIBUTION_/i.test(filename) ? 'SBI'
+                 : /^dividendlist_/i.test(filename)  ? '楽天'
+                 : '';
 
     for (let i = 0; i < Math.min(lines.length, 20); i++) {
       const cols = this._splitCsv(lines[i]);
@@ -1343,10 +1371,9 @@ const App = {
       codeCol     = cols.findIndex(c => /銘柄コード|証券コード/i.test(c));
       nameCol     = cols.findIndex(c => /銘柄名|^銘柄$/.test(c));
       grossCol    = cols.findIndex(c => /税引前|gross/i.test(c));
-      // 楽天「受取金額」・SBI「受取額」・汎用「税引後」を全てnetとして検出
       netCol      = cols.findIndex(c => /税引後|受取金|受取額|net/i.test(c));
       currencyCol = cols.findIndex(c => /受取通貨|通貨単位|通貨/i.test(c) && !/単価/.test(c));
-      if (codeCol < 0 && nameCol >= 0) nameHasCode = true; // SBI形式
+      if (codeCol < 0 && nameCol >= 0) nameHasCode = true;
       if (dateCol >= 0 && (codeCol >= 0 || nameCol >= 0) && (grossCol >= 0 || netCol >= 0)) {
         headerIdx = i; break;
       }
@@ -1407,7 +1434,7 @@ const App = {
       if ((net ?? 0) <= 0 && (gross ?? 0) <= 0) continue;
 
       raw.push({
-        code, name: rawName || code, date: dateStr, currency,
+        code, name: rawName || code, date: dateStr, currency, broker,
         gross:    isUSD ? 0 : (gross ?? 0),
         net:      isUSD ? 0 : (net   ?? 0),
         grossUSD: isUSD ? (gross ?? 0) : 0,
@@ -1417,10 +1444,10 @@ const App = {
 
     if (!raw.length) { Toast.show('配当データが見つかりませんでした', 'error'); return; }
 
-    // 同日・同銘柄の複数行（口座別など）をマージ
+    // 同日・同銘柄・同証券会社の複数行（口座別など）をマージ
     const mergedMap = {};
     for (const d of raw) {
-      const key = `${d.code}|${d.date}`;
+      const key = `${d.code}|${d.date}|${d.broker}`;
       if (mergedMap[key]) {
         mergedMap[key].gross    += d.gross;
         mergedMap[key].net      += d.net;
@@ -1448,7 +1475,7 @@ const App = {
     parsed.forEach(d => {
       if (!this.dividends[d.code]) this.dividends[d.code] = [];
       const arr = this.dividends[d.code];
-      const existIdx = arr.findIndex(x => x.date === d.date);
+      const existIdx = arr.findIndex(x => x.date === d.date && (x.broker ?? '') === (d.broker ?? ''));
       if (existIdx >= 0) { arr[existIdx] = d; updated++; }
       else               { arr.push(d); added++; }
       if (d.name && !d.code.startsWith('FUND_')) {
