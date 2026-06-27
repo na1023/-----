@@ -1206,12 +1206,12 @@ const App = {
 
       <div class="div-summary">
         <div class="card">
-          <div class="card-title">年間配当合計</div>
+          <div class="card-title">年間配当合計（円）</div>
           <div class="card-value">${yen(result.total)}</div>
-          <div class="card-sub">${this.taxAfter ? '税引後' : '税引前'}</div>
+          ${result.totalUSD > 0 ? `<div class="card-sub" style="color:var(--text-2)">+ $${result.totalUSD.toFixed(2)} USD</div>` : `<div class="card-sub">${this.taxAfter ? '税引後' : '税引前'}</div>`}
         </div>
         <div class="card">
-          <div class="card-title">月平均</div>
+          <div class="card-title">月平均（円）</div>
           <div class="card-value">${yen(result.total / 12)}</div>
           <div class="card-sub">1ヶ月あたり</div>
         </div>
@@ -1241,17 +1241,22 @@ const App = {
             <th class="num">税引前</th><th class="num">税引後</th>
           </tr></thead>
           <tbody>
-            ${result.byStock.map(s => `<tr>
-              <td><div style="font-size:.75rem;color:var(--text-3)">${s.code}</div><div style="font-weight:600">${s.name}</div></td>
+            ${result.byStock.map(s => {
+              const isUSD = s.amountUSD > 0 && s.amount === 0;
+              const grossDisp = isUSD ? `$${s.grossUSD.toFixed(2)}` : yen(s.gross);
+              const netDisp   = isUSD ? `$${s.netUSD.toFixed(2)}`   : yen(s.net);
+              const codeDisp  = s.isFund ? '投信' : s.code;
+              return `<tr>
+              <td><div style="font-size:.75rem;color:var(--text-3)">${codeDisp}</div><div style="font-weight:600">${s.name}</div></td>
               <td><span class="account-badge ${s.account}">${s.account}</span></td>
-              <td class="num">${num(s.shares)}</td>
-              <td class="num">${yen(s.perShare,1)}</td>
-              <td class="num">${yen(s.gross)}</td>
-              <td class="num">${yen(s.net)}</td>
-            </tr>`).join('')}
+              <td class="num">${s.isFund ? (s.shares > 0 ? num(s.shares)+'口' : '—') : num(s.shares)}</td>
+              <td class="num">${isUSD ? '$'+s.perShare.toFixed(4) : yen(s.perShare,1)}</td>
+              <td class="num">${grossDisp}</td>
+              <td class="num">${netDisp}</td>
+            </tr>`;}).join('')}
           </tbody>
           <tfoot><tr class="tfoot-row">
-            <td colspan="4">合計</td>
+            <td colspan="4">合計（円）</td>
             <td class="num">${yen(totalPre)}</td>
             <td class="num">${yen(totalPost)}</td>
           </tr></tfoot>
@@ -1299,24 +1304,22 @@ const App = {
     if (!lines.length) { Toast.show('CSVが空です', 'error'); return; }
 
     let headerIdx = -1, dateCol = -1, codeCol = -1, nameCol = -1;
-    let grossCol = -1, netCol = -1, sharesCol = -1;
+    let grossCol = -1, netCol = -1, currencyCol = -1;
     let nameHasCode = false; // SBI形式: 銘柄名にコードが埋め込まれている
 
     for (let i = 0; i < Math.min(lines.length, 20); i++) {
       const cols = this._splitCsv(lines[i]);
       const hasDivKey = cols.some(c => /受取日|入金日|支払日|配当|dividend|受渡日/i.test(c));
       if (!hasDivKey) continue;
-      dateCol  = cols.findIndex(c => /受取日|入金日|支払日|決済日|受渡日/i.test(c));
-      codeCol  = cols.findIndex(c => /銘柄コード|証券コード|コード/i.test(c) && !/銘柄名/.test(c));
-      nameCol  = cols.findIndex(c => /銘柄名|銘柄/i.test(c) && !/コード/.test(c));
-      sharesCol= cols.findIndex(c => /数量|株数/i.test(c));
-      grossCol = cols.findIndex(c => /税引前|gross/i.test(c));
-      netCol   = cols.findIndex(c => /税引後|net/i.test(c));
-      // SBI形式: 「受取額(税引後・円)」— 税引後キーワードとして扱う
-      if (netCol < 0) netCol = cols.findIndex(c => /受取額/i.test(c));
-      // SBI形式はコード列がなく銘柄名末尾に埋め込み
-      if (codeCol < 0 && nameCol >= 0) nameHasCode = true;
-      if (dateCol >= 0 && nameCol >= 0 && (grossCol >= 0 || netCol >= 0)) {
+      dateCol     = cols.findIndex(c => /受取日|入金日|支払日|決済日|受渡日/i.test(c));
+      codeCol     = cols.findIndex(c => /銘柄コード|証券コード/i.test(c));
+      nameCol     = cols.findIndex(c => /銘柄名|^銘柄$/.test(c));
+      grossCol    = cols.findIndex(c => /税引前|gross/i.test(c));
+      // 楽天「受取金額」・SBI「受取額」・汎用「税引後」を全てnetとして検出
+      netCol      = cols.findIndex(c => /税引後|受取金|受取額|net/i.test(c));
+      currencyCol = cols.findIndex(c => /受取通貨|通貨単位|通貨/i.test(c) && !/単価/.test(c));
+      if (codeCol < 0 && nameCol >= 0) nameHasCode = true; // SBI形式
+      if (dateCol >= 0 && (codeCol >= 0 || nameCol >= 0) && (grossCol >= 0 || netCol >= 0)) {
         headerIdx = i; break;
       }
     }
@@ -1337,9 +1340,9 @@ const App = {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) continue;
 
       let rawName = nameCol >= 0 ? (cols[nameCol] ?? '').trim() : '';
-      let code    = codeCol >= 0 ? (cols[codeCol] ?? '').replace(/[^\dA-Za-z]/g, '') : '';
+      let code    = codeCol >= 0 ? (cols[codeCol] ?? '').trim() : '';
 
-      // SBI形式: 銘柄名末尾のコードを分離 (例: "システナ 2317" → code=2317, name=システナ)
+      // SBI形式: 銘柄名末尾のコードを分離 (例: "システナ 2317", "ベライゾン VZ")
       if (nameHasCode && rawName) {
         const tokens = rawName.split(/\s+/);
         const last = tokens[tokens.length - 1] ?? '';
@@ -1349,20 +1352,37 @@ const App = {
         }
       }
 
-      // 国内株式は4-5桁数字、米国株式はアルファベット1-5文字
-      if (!code || (!/^\d{4,5}$/.test(code) && !/^[A-Za-z]{1,5}$/.test(code))) continue;
-      code = code.toUpperCase();
+      // 通貨判定
+      const currRaw = currencyCol >= 0 ? (cols[currencyCol] ?? '') : '';
+      const isUSD = /USD|ドル|dollar/i.test(currRaw);
+      const currency = isUSD ? 'USD' : 'JPY';
+
+      // 投資信託: コード空 → ファンド名から安定キーを生成
+      if (!code && rawName) {
+        code = 'FUND_' + rawName.replace(/[^぀-ヿ一-鿿\w]/g, '').slice(0, 15);
+      }
+      if (!code) continue;
+
+      // コード形式チェック（国内株/米国株/ファンド以外は除外）
+      if (!code.startsWith('FUND_') && !/^\d{4,5}$/.test(code) && !/^[A-Za-z]{1,5}$/.test(code)) continue;
+      if (!code.startsWith('FUND_')) code = code.toUpperCase();
 
       let net   = netCol   >= 0 ? parseFloat((cols[netCol]   ?? '').replace(/,/g, '')) : NaN;
       let gross = grossCol >= 0 ? parseFloat((cols[grossCol] ?? '').replace(/,/g, '')) : NaN;
       if (isNaN(net) && isNaN(gross)) continue;
 
-      // 片方だけある場合は逆算
-      if (isNaN(gross) && !isNaN(net)) gross = Math.round(net / TAX_KEEP * 100) / 100;
-      if (isNaN(net)   && !isNaN(gross)) net = Math.round(gross * TAX_KEEP * 100) / 100;
-      if (net <= 0 && gross <= 0) continue;
+      // 片方のみ → 逆算（JPY。USD は税構造が異なるため片方をそのまま使用）
+      if (isNaN(gross) && !isNaN(net))   gross = isUSD ? net   : Math.round(net   / TAX_KEEP * 100) / 100;
+      if (isNaN(net)   && !isNaN(gross)) net   = isUSD ? gross : Math.round(gross * TAX_KEEP * 100) / 100;
+      if ((net ?? 0) <= 0 && (gross ?? 0) <= 0) continue;
 
-      raw.push({ code, name: rawName || code, date: dateStr, gross, net });
+      raw.push({
+        code, name: rawName || code, date: dateStr, currency,
+        gross:    isUSD ? 0 : (gross ?? 0),
+        net:      isUSD ? 0 : (net   ?? 0),
+        grossUSD: isUSD ? (gross ?? 0) : 0,
+        netUSD:   isUSD ? (net   ?? 0) : 0,
+      });
     }
 
     if (!raw.length) { Toast.show('配当データが見つかりませんでした', 'error'); return; }
@@ -1372,8 +1392,10 @@ const App = {
     for (const d of raw) {
       const key = `${d.code}|${d.date}`;
       if (mergedMap[key]) {
-        mergedMap[key].gross += d.gross;
-        mergedMap[key].net   += d.net;
+        mergedMap[key].gross    += d.gross;
+        mergedMap[key].net      += d.net;
+        mergedMap[key].grossUSD += d.grossUSD;
+        mergedMap[key].netUSD   += d.netUSD;
       } else {
         mergedMap[key] = { ...d };
       }
@@ -1393,7 +1415,7 @@ const App = {
       const existIdx = arr.findIndex(x => x.date === d.date);
       if (existIdx >= 0) { arr[existIdx] = d; updated++; }
       else               { arr.push(d); added++; }
-      if (d.name) {
+      if (d.name && !d.code.startsWith('FUND_')) {
         const h = this.holdings.find(h => h.code === d.code);
         if (h && (!h.name || h.name === h.code)) h.name = d.name;
       }

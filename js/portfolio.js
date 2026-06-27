@@ -27,35 +27,49 @@ const Portfolio = (() => {
     return { totalValue, totalCost, pnl, pnlPct, dayChg };
   }
 
-  // dividends[code] = [{ date, gross, net, perShare }]  ← CSV実績金額
+  // dividends[code] = [{ date, gross, net, grossUSD, netUSD, currency, perShare }]
   function annualDividend(holdings, dividends, year, taxAfter = false) {
-    let total = 0;
+    let total = 0, totalUSD = 0;
     const byCode = {};
 
     Object.entries(dividends).forEach(([code, divs]) => {
       const yearDivs = (divs || []).filter(d => String(d.date).startsWith(String(year)));
       if (!yearDivs.length) return;
-      const gross    = yearDivs.reduce((s, d) => s + (d.gross ?? 0), 0);
-      const net      = yearDivs.reduce((s, d) => s + (d.net   ?? gross * TAX), 0);
+      const gross    = yearDivs.reduce((s, d) => s + (d.gross    ?? 0), 0);
+      const net      = yearDivs.reduce((s, d) => s + (d.net      ?? 0), 0);
+      const grossUSD = yearDivs.reduce((s, d) => s + (d.grossUSD ?? 0), 0);
+      const netUSD   = yearDivs.reduce((s, d) => s + (d.netUSD   ?? 0), 0);
       const perShare = yearDivs.reduce((s, d) => s + (d.perShare ?? 0), 0);
-      const amount   = taxAfter ? net : gross;
-      total += amount;
-      const h = holdings.find(h => h.code === code) ?? { code, name: code, shares: 0, account: '—' };
-      byCode[code] = { code, name: h.name, shares: h.shares, account: h.account, perShare, gross, net, amount };
+      const amount    = taxAfter ? net    : gross;
+      const amountUSD = taxAfter ? netUSD : grossUSD;
+      total    += amount;
+      totalUSD += amountUSD;
+      const isFund = code.startsWith('FUND_');
+      const h = !isFund ? (holdings.find(h => h.code === code) ?? null) : null;
+      const name = h?.name ?? (isFund ? (yearDivs[0]?.name ?? code) : code);
+      byCode[code] = {
+        code, name, isFund,
+        shares: h?.shares ?? 0,
+        account: h?.account ?? (isFund ? '投信' : '—'),
+        perShare, gross, net, grossUSD, netUSD, amount, amountUSD,
+      };
     });
 
-    const byStock = Object.values(byCode).sort((a, b) => b.amount - a.amount);
-    return { total, byStock };
+    const byStock = Object.values(byCode).sort(
+      (a, b) => (b.amount + b.amountUSD * 150) - (a.amount + a.amountUSD * 150)
+    );
+    return { total, totalUSD, byStock };
   }
 
   function monthlyDividend(holdings, dividends, year, taxAfter = false) {
     const months = Array.from({ length: 12 }, () => 0);
     Object.values(dividends).forEach(divs => {
       (divs || []).filter(d => String(d.date).startsWith(String(year))).forEach(d => {
-        const m     = parseInt(String(d.date).slice(5, 7), 10) - 1;
-        const gross = d.gross ?? 0;
-        const net   = d.net   ?? gross * TAX;
-        if (m >= 0 && m < 12) months[m] += taxAfter ? net : gross;
+        const m = parseInt(String(d.date).slice(5, 7), 10) - 1;
+        if (m < 0 || m >= 12) return;
+        months[m] += taxAfter ? (d.net ?? 0) : (d.gross ?? 0);
+        // USD分は参考換算（1USD≈150円）で月別チャートに加算
+        months[m] += (taxAfter ? (d.netUSD ?? 0) : (d.grossUSD ?? 0)) * 150;
       });
     });
     return months;
