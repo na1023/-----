@@ -103,12 +103,32 @@ const Sync = {
   async _startSync() {
     const ref = this._docRef();
     try {
-      const snap   = await ref.get();
-      const remote = snap.exists ? (snap.data().holdings ?? []) : [];
+      const snap        = await ref.get();
+      const data        = snap.exists ? snap.data() : {};
+      const remote      = data.holdings ?? [];
+      const remoteDivs  = data.dividends ?? null;
+      const remoteDivTs = data.dividendsUpdatedAt ?? 0;
+
       const merged = this._merge(App.holdings, remote);
       App.holdings = merged;
       HoldingStorage.save(merged);
-      await ref.set({ holdings: merged, updatedAt: Date.now() });
+
+      // 配当: タイムスタンプが新しい方を使う（デバイス間で最新を優先）
+      const localDivTs = parseInt(localStorage.getItem('kabu_divs_ts') ?? '0', 10);
+      if (remoteDivs !== null && remoteDivTs > localDivTs) {
+        App.dividends = remoteDivs;
+        DividendStorage.save(remoteDivs);
+        localStorage.setItem('kabu_divs_ts', String(remoteDivTs));
+      }
+
+      const now = Date.now();
+      await ref.set({
+        holdings: merged,
+        dividends: App.dividends,
+        dividendsUpdatedAt: remoteDivTs > localDivTs ? remoteDivTs : now,
+        updatedAt: now,
+      });
+      if (remoteDivTs <= localDivTs) localStorage.setItem('kabu_divs_ts', String(now));
     } catch (e) {
       console.error(e);
       this.status = 'error';
@@ -119,12 +139,24 @@ const Sync = {
     if (this.unsub) this.unsub();
     this.unsub = ref.onSnapshot(snap => {
       if (!snap.exists) return;
-      const remote = snap.data().holdings ?? [];
+      const data       = snap.data();
+      const remote     = data.holdings ?? [];
+      const remoteDivs = data.dividends ?? null;
+      const remoteDivTs = data.dividendsUpdatedAt ?? 0;
+      const localDivTs  = parseInt(localStorage.getItem('kabu_divs_ts') ?? '0', 10);
+      let changed = false;
       if (JSON.stringify(remote) !== JSON.stringify(App.holdings)) {
         App.holdings = remote;
         HoldingStorage.save(remote);
-        App.navigate(App.page, false);
+        changed = true;
       }
+      if (remoteDivs !== null && remoteDivTs > localDivTs) {
+        App.dividends = remoteDivs;
+        DividendStorage.save(remoteDivs);
+        localStorage.setItem('kabu_divs_ts', String(remoteDivTs));
+        changed = true;
+      }
+      if (changed) App.navigate(App.page, false);
     }, err => { console.error(err); this.status = 'error'; });
 
     this.status = 'on';
@@ -135,8 +167,15 @@ const Sync = {
   push() {
     if (this.status !== 'on' || !this.user || !this.db) return;
     clearTimeout(this._t);
+    const now = Date.now();
+    localStorage.setItem('kabu_divs_ts', String(now));
     this._t = setTimeout(() => {
-      this._docRef().set({ holdings: App.holdings, updatedAt: Date.now() }).catch(e => console.error(e));
+      this._docRef().set({
+        holdings: App.holdings,
+        dividends: App.dividends,
+        dividendsUpdatedAt: now,
+        updatedAt: now,
+      }).catch(e => console.error(e));
     }, 600);
   },
 };
