@@ -992,7 +992,7 @@ const App = {
       codeCol      = ci;
       nameCol      = cols.findIndex(c => /銘柄名|名称/.test(c) || c.trim() === '銘柄');
       sharesCol    = cols.findIndex(c => /保有数量|保有株数|数量|株数|残高/.test(c) && !/評価|損益|取得金額|時価/.test(c));
-      perShareCol  = cols.findIndex(c => /平均取得単価|取得単価|平均単価/.test(c) && !/金額/.test(c));
+      perShareCol  = cols.findIndex(c => /平均取得単価|取得単価|平均単価|平均取得価額|取得価額/.test(c) && !/金額/.test(c));
       totalCostCol = perShareCol < 0 ? cols.findIndex(c => /取得金額|取得価格/.test(c)) : -1;
       accountCol   = cols.findIndex(c => /^口座$|口座区分|口座種別|預り区分/.test(c));
       headerIdx    = i;
@@ -1295,26 +1295,30 @@ const App = {
   },
 
   _parseDivCsv(rawText, filename) {
-    const text = rawText;
-    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const lines = rawText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
     if (!lines.length) { Toast.show('CSVが空です', 'error'); return; }
 
     let headerIdx = -1, dateCol = -1, codeCol = -1, nameCol = -1;
-    let grossCol = -1, netCol = -1, perShareCol = -1, sharesCol = -1;
+    let grossCol = -1, netCol = -1, sharesCol = -1;
+    let nameHasCode = false; // SBI形式: 銘柄名にコードが埋め込まれている
 
     for (let i = 0; i < Math.min(lines.length, 20); i++) {
       const cols = this._splitCsv(lines[i]);
-      // ヘッダー行の検出
-      const hasDivKey = cols.some(c => /受取日|入金日|支払日|配当|dividend/i.test(c));
+      const hasDivKey = cols.some(c => /受取日|入金日|支払日|配当|dividend|受渡日/i.test(c));
       if (!hasDivKey) continue;
-      dateCol     = cols.findIndex(c => /受取日|入金日|支払日|決済日/i.test(c));
-      codeCol     = cols.findIndex(c => /銘柄コード|証券コード|コード/i.test(c));
-      nameCol     = cols.findIndex(c => /銘柄名|銘柄/i.test(c) && !/コード/.test(c));
-      perShareCol = cols.findIndex(c => /単価|1株|一株/i.test(c));
-      sharesCol   = cols.findIndex(c => /数量|株数/i.test(c));
-      grossCol    = cols.findIndex(c => /税引前|配当金額.*税引前|gross/i.test(c));
-      netCol      = cols.findIndex(c => /税引後|配当金額.*税引後|net/i.test(c));
-      if (dateCol >= 0 && (codeCol >= 0 || grossCol >= 0)) { headerIdx = i; break; }
+      dateCol  = cols.findIndex(c => /受取日|入金日|支払日|決済日|受渡日/i.test(c));
+      codeCol  = cols.findIndex(c => /銘柄コード|証券コード|コード/i.test(c) && !/銘柄名/.test(c));
+      nameCol  = cols.findIndex(c => /銘柄名|銘柄/i.test(c) && !/コード/.test(c));
+      sharesCol= cols.findIndex(c => /数量|株数/i.test(c));
+      grossCol = cols.findIndex(c => /税引前|gross/i.test(c));
+      netCol   = cols.findIndex(c => /税引後|net/i.test(c));
+      // SBI形式: 「受取額(税引後・円)」— 税引後キーワードとして扱う
+      if (netCol < 0) netCol = cols.findIndex(c => /受取額/i.test(c));
+      // SBI形式はコード列がなく銘柄名末尾に埋め込み
+      if (codeCol < 0 && nameCol >= 0) nameHasCode = true;
+      if (dateCol >= 0 && nameCol >= 0 && (grossCol >= 0 || netCol >= 0)) {
+        headerIdx = i; break;
+      }
     }
 
     if (headerIdx < 0) {
@@ -1322,38 +1326,63 @@ const App = {
       return;
     }
 
-    const parsed = [];
+    const TAX_KEEP = 1 - 0.20315;
+    const raw = [];
     for (let i = headerIdx + 1; i < lines.length; i++) {
       const cols = this._splitCsv(lines[i]);
       if (cols.length < 2) continue;
 
-      const rawDate = dateCol >= 0 ? (cols[dateCol] ?? '') : '';
+      const rawDate = (cols[dateCol] ?? '');
       const dateStr = rawDate.replace(/\//g, '-').replace(/年|月/g, '-').replace(/日/, '').trim().slice(0, 10);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) continue;
 
-      const code  = codeCol >= 0 ? (cols[codeCol] ?? '').replace(/[^\d]/g, '') : '';
-      const name  = nameCol >= 0 ? (cols[nameCol] ?? '').trim() : '';
-      const gross = grossCol >= 0    ? parseFloat((cols[grossCol] ?? '').replace(/,/g, '')) : NaN;
-      const net   = netCol >= 0      ? parseFloat((cols[netCol]   ?? '').replace(/,/g, '')) : NaN;
-      const perShare = perShareCol >= 0 ? parseFloat((cols[perShareCol] ?? '').replace(/,/g, '')) : NaN;
+      let rawName = nameCol >= 0 ? (cols[nameCol] ?? '').trim() : '';
+      let code    = codeCol >= 0 ? (cols[codeCol] ?? '').replace(/[^\dA-Za-z]/g, '') : '';
 
-      if (!code || code.length < 4) continue;
-      if (isNaN(gross) && isNaN(net)) continue;
+      // SBI形式: 銘柄名末尾のコードを分離 (例: "システナ 2317" → code=2317, name=システナ)
+      if (nameHasCode && rawName) {
+        const tokens = rawName.split(/\s+/);
+        const last = tokens[tokens.length - 1] ?? '';
+        if (/^\d{4,5}$/.test(last) || /^[A-Z]{1,5}$/.test(last)) {
+          code    = last;
+          rawName = tokens.slice(0, -1).join(' ');
+        }
+      }
 
-      parsed.push({
-        code, name, date: dateStr,
-        gross:    isNaN(gross) ? 0 : gross,
-        net:      isNaN(net)   ? 0 : net,
-        perShare: isNaN(perShare) ? 0 : perShare,
-      });
+      // 国内株式は4-5桁数字、米国株式はアルファベット1-5文字
+      if (!code || (!/^\d{4,5}$/.test(code) && !/^[A-Za-z]{1,5}$/.test(code))) continue;
+      code = code.toUpperCase();
+
+      let net   = netCol   >= 0 ? parseFloat((cols[netCol]   ?? '').replace(/,/g, '')) : NaN;
+      let gross = grossCol >= 0 ? parseFloat((cols[grossCol] ?? '').replace(/,/g, '')) : NaN;
+      if (isNaN(net) && isNaN(gross)) continue;
+
+      // 片方だけある場合は逆算
+      if (isNaN(gross) && !isNaN(net)) gross = Math.round(net / TAX_KEEP * 100) / 100;
+      if (isNaN(net)   && !isNaN(gross)) net = Math.round(gross * TAX_KEEP * 100) / 100;
+      if (net <= 0 && gross <= 0) continue;
+
+      raw.push({ code, name: rawName || code, date: dateStr, gross, net });
     }
 
-    if (!parsed.length) { Toast.show('配当データが見つかりませんでした', 'error'); return; }
+    if (!raw.length) { Toast.show('配当データが見つかりませんでした', 'error'); return; }
 
-    // 既存に追加 or 年ごと置換を選択
-    const preview = [...new Set(parsed.map(d => d.code))].slice(0, 5).join(', ');
+    // 同日・同銘柄の複数行（口座別など）をマージ
+    const mergedMap = {};
+    for (const d of raw) {
+      const key = `${d.code}|${d.date}`;
+      if (mergedMap[key]) {
+        mergedMap[key].gross += d.gross;
+        mergedMap[key].net   += d.net;
+      } else {
+        mergedMap[key] = { ...d };
+      }
+    }
+    const parsed = Object.values(mergedMap);
+
+    const preview = [...new Set(parsed.map(d => d.name))].slice(0, 5).join(', ');
     const mode = confirm(
-      `配当データ ${parsed.length}件を検出:\n銘柄: ${preview}…\n\nOK = 既存に追加（重複は上書き）\nキャンセル = キャンセル`
+      `配当データ ${parsed.length}件を検出:\n${preview}…\n\nOK = 既存に追加（重複は上書き）\nキャンセル = キャンセル`
     );
     if (!mode) return;
 
@@ -1364,7 +1393,6 @@ const App = {
       const existIdx = arr.findIndex(x => x.date === d.date);
       if (existIdx >= 0) { arr[existIdx] = d; updated++; }
       else               { arr.push(d); added++; }
-      // 銘柄名も更新（コードのままになっている場合）
       if (d.name) {
         const h = this.holdings.find(h => h.code === d.code);
         if (h && (!h.name || h.name === h.code)) h.name = d.name;
